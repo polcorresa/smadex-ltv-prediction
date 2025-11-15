@@ -17,6 +17,11 @@ class FeatureEngineer:
         self.config = config
         self.label_encoders = {}
         self.target_encoders = {}
+
+    @staticmethod
+    def _to_numeric(series: pd.Series) -> pd.Series:
+        """Safely coerce a series to numeric for arithmetic operations"""
+        return pd.to_numeric(series, errors='coerce')
     
     def create_interaction_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create interaction features between key variables"""
@@ -24,38 +29,33 @@ class FeatureEngineer:
         
         # Whale × Activity frequency
         if 'whale_users_bundle_revenue_prank_mean' in df.columns and 'avg_daily_sessions' in df.columns:
-            df['whale_x_freq'] = (
-                df['whale_users_bundle_revenue_prank_mean'] * 
-                df['avg_daily_sessions']
-            )
+            whale = self._to_numeric(df['whale_users_bundle_revenue_prank_mean'])
+            freq = self._to_numeric(df['avg_daily_sessions'])
+            df['whale_x_freq'] = whale * freq
         
         # Purchase history × Recency
-        if 'num_buys_bundle_mean' in df.columns and 'last_buy_days_ago' in df.columns:
-            df['purchase_recency_score'] = (
-                df['num_buys_bundle_mean'] * 
-                df['last_buy_recency_weight']
-            )
+        if 'num_buys_bundle_mean' in df.columns and 'last_buy_recency_weight' in df.columns:
+            num_buys = self._to_numeric(df['num_buys_bundle_mean'])
+            recency_weight = self._to_numeric(df['last_buy_recency_weight'])
+            df['purchase_recency_score'] = num_buys * recency_weight
         
         # Install velocity
         if 'new_bundles_count' in df.columns and 'weeks_since_first_seen' in df.columns:
-            df['install_velocity'] = (
-                df['new_bundles_count'] / 
-                (df['weeks_since_first_seen'] + 1)
-            )
+            new_bundles = self._to_numeric(df['new_bundles_count'])
+            weeks_seen = self._to_numeric(df['weeks_since_first_seen'])
+            df['install_velocity'] = new_bundles / (weeks_seen + 1)
         
         # Category spending affinity
-        if 'iap_revenue_usd_category_mean' in df.columns and 'num_buys_category_mean' in df.columns:
-            df['category_avg_purchase_value'] = (
-                df['iap_revenue_usd_category_mean'] / 
-                (df['num_buys_category_count'] + 1)
-            )
+        if 'iap_revenue_usd_category_mean' in df.columns and 'num_buys_category_count' in df.columns:
+            cat_rev = self._to_numeric(df['iap_revenue_usd_category_mean'])
+            cat_count = self._to_numeric(df['num_buys_category_count'])
+            df['category_avg_purchase_value'] = cat_rev / (cat_count + 1)
         
         # Device price × Purchase history (affordability proxy)
         if 'release_msrp' in df.columns and 'iap_revenue_usd_bundle_mean' in df.columns:
-            df['device_spending_ratio'] = (
-                df['iap_revenue_usd_bundle_mean'] / 
-                (df['release_msrp'] + 1)
-            )
+            bundle_rev = self._to_numeric(df['iap_revenue_usd_bundle_mean'])
+            msrp = self._to_numeric(df['release_msrp'])
+            df['device_spending_ratio'] = bundle_rev / (msrp + 1)
         
         return df
     
@@ -166,23 +166,25 @@ class FeatureEngineer:
         logger.info("Creating temporal features...")
         
         if 'hour' in df.columns:
+            hour = self._to_numeric(df['hour'])
             # Cyclical encoding
-            df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-            df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+            df['hour_sin'] = np.sin(2 * np.pi * hour / 24)
+            df['hour_cos'] = np.cos(2 * np.pi * hour / 24)
             
             # Time segments
-            df['is_morning'] = (df['hour'] >= 6) & (df['hour'] < 12)
-            df['is_afternoon'] = (df['hour'] >= 12) & (df['hour'] < 18)
-            df['is_evening'] = (df['hour'] >= 18) & (df['hour'] < 22)
-            df['is_night'] = (df['hour'] >= 22) | (df['hour'] < 6)
+            df['is_morning'] = (hour >= 6) & (hour < 12)
+            df['is_afternoon'] = (hour >= 12) & (hour < 18)
+            df['is_evening'] = (hour >= 18) & (hour < 22)
+            df['is_night'] = (hour >= 22) | (hour < 6)
         
         if 'weekday' in df.columns:
+            weekday = self._to_numeric(df['weekday'])
             # Cyclical encoding
-            df['weekday_sin'] = np.sin(2 * np.pi * df['weekday'] / 7)
-            df['weekday_cos'] = np.cos(2 * np.pi * df['weekday'] / 7)
+            df['weekday_sin'] = np.sin(2 * np.pi * weekday / 7)
+            df['weekday_cos'] = np.cos(2 * np.pi * weekday / 7)
             
             # Weekend flag
-            df['is_weekend'] = df['weekday'].isin([5, 6])
+            df['is_weekend'] = weekday.isin([5, 6]) if hasattr(weekday, 'isin') else df['weekday'].isin([5, 6])
         
         return df
     
@@ -192,21 +194,21 @@ class FeatureEngineer:
         
         # Session consistency
         if 'avg_daily_sessions' in df.columns and 'avg_act_days' in df.columns:
-            df['session_consistency'] = (
-                df['avg_daily_sessions'] * df['avg_act_days']
-            )
+            sessions = self._to_numeric(df['avg_daily_sessions'])
+            act_days = self._to_numeric(df['avg_act_days'])
+            df['session_consistency'] = sessions * act_days
         
         # Engagement score
         if 'avg_duration' in df.columns and 'avg_daily_sessions' in df.columns:
-            df['engagement_score'] = (
-                df['avg_duration'] * df['avg_daily_sessions']
-            )
+            duration = self._to_numeric(df['avg_duration'])
+            sessions = self._to_numeric(df['avg_daily_sessions'])
+            df['engagement_score'] = duration * sessions
         
         # WiFi preference score
         if 'wifi_ratio' in df.columns and 'avg_daily_sessions' in df.columns:
-            df['wifi_engagement'] = (
-                df['wifi_ratio'] * df['avg_daily_sessions']
-            )
+            wifi_ratio = self._to_numeric(df['wifi_ratio'])
+            sessions = self._to_numeric(df['avg_daily_sessions'])
+            df['wifi_engagement'] = wifi_ratio * sessions
         
         return df
     

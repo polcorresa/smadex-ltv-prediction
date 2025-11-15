@@ -3,6 +3,7 @@ Orchestrates the complete training pipeline
 """
 import numpy as np
 import pandas as pd
+import dask.dataframe as dd
 from pathlib import Path
 import yaml
 import logging
@@ -48,6 +49,28 @@ class TrainingPipeline:
         Path('models').mkdir(exist_ok=True)
         Path('logs').mkdir(exist_ok=True)
     
+    def _apply_sampling(self, ddf: dd.DataFrame, dataset: str) -> dd.DataFrame:
+        """Optionally sample or cap partitions to reduce memory usage"""
+        if ddf is None:
+            return None
+
+        sampling_cfg = self.config['training'].get('sampling', {}) or {}
+        random_state = sampling_cfg.get('random_state', 42)
+
+        frac_key = f'{dataset}_frac'
+        frac = sampling_cfg.get(frac_key, sampling_cfg.get('frac', 1.0))
+        if frac is not None and frac < 1.0:
+            logger.info(f"Sampling {dataset} dataset with frac={frac}")
+            ddf = ddf.sample(frac=frac, random_state=random_state)
+
+        max_parts_key = f'max_{dataset}_partitions'
+        max_parts = sampling_cfg.get(max_parts_key)
+        if isinstance(max_parts, int) and max_parts > 0:
+            logger.info(f"Restricting {dataset} dataset to first {max_parts} partitions")
+            ddf = ddf.partitions[:max_parts]
+
+        return ddf
+
     def prepare_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Load and preprocess data
@@ -61,13 +84,17 @@ class TrainingPipeline:
         
         # Load data
         train_ddf, val_ddf = self.data_loader.load_train(validation_split=True)
+        train_ddf = self._apply_sampling(train_ddf, 'train')
+        val_ddf = self._apply_sampling(val_ddf, 'val') if val_ddf is not None else None
         
         # Compute to pandas (batched if needed)
         logger.info("Computing train data...")
         train_df = train_ddf.compute()
+        train_df = train_df.reset_index(drop=True)
         
         logger.info("Computing validation data...")
         val_df = val_ddf.compute()
+        val_df = val_df.reset_index(drop=True)
         
         logger.info(f"Train size: {len(train_df)}")
         logger.info(f"Validation size: {len(val_df)}")

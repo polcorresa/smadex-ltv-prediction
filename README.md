@@ -54,6 +54,8 @@ pip install -r requirements.txt
 python scripts/train.py
 ```
 
+**Low-memory tip:** Set `training.sampling.train_frac` / `val_frac` or `max_*_partitions` in `config/config.yaml` (e.g., `train_frac: 0.2`) to downsample the Dask DataFrame before calling `.compute()`. This keeps RAM usage manageable on 8 GB laptops while you debug.
+
 ### 3. (Optional) Evaluate cached validation data
 
 ```bash

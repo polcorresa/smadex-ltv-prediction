@@ -119,6 +119,12 @@ training:
   random_state: 42
   use_gpu: false
   cache_features: true
+  sampling:
+    train_frac: 1.0        # set <1.0 to randomly sample training data
+    val_frac: 1.0          # set <1.0 to randomly sample validation data
+    max_train_partitions: 20  # cap number of Dask partitions (e.g., 50) if RAM is limited
+    max_val_partitions: 6
+    random_state: 42
 
 inference:
   batch_size: 5000
