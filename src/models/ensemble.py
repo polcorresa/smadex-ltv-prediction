@@ -23,6 +23,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from src.types import RevenuePredictions, TimeHorizon
+
 
 def _rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """
@@ -204,3 +206,37 @@ class StackingEnsemble:
         import joblib
         self.ensemble = joblib.load(path)
         logger.info(f"Ensemble loaded from {path}")
+
+
+def build_meta_features(
+    buyer_proba: np.ndarray,
+    revenue_preds: RevenuePredictions,
+    loss_config: Dict[str, Any]
+) -> pd.DataFrame:
+    """Create Stage 3 meta-features shared by training and inference."""
+    assert revenue_preds.length == len(buyer_proba), \
+        "Buyer probabilities and revenue predictions must align"
+
+    data: Dict[str, np.ndarray] = {'buyer_proba': buyer_proba}
+
+    horizons = revenue_preds.available_horizons()
+    for horizon in horizons:
+        horizon_preds = revenue_preds.get(horizon)
+        assert horizon_preds is not None, "Missing predictions for configured horizon"
+        data[f'revenue_{horizon.value}'] = horizon_preds
+
+    weights = np.zeros_like(buyer_proba, dtype=float)
+    for horizon in horizons:
+        horizon_preds = revenue_preds.get(horizon)
+        assert horizon_preds is not None
+        lambda_key = f'lambda_{horizon.value}'
+        weight = float(loss_config.get(lambda_key, 0.0))
+        weights += weight * horizon_preds
+    data['weighted_revenue'] = weights
+
+    primary_horizon = revenue_preds.primary_horizon()
+    primary_preds = revenue_preds.get(primary_horizon)
+    assert primary_preds is not None
+    data['buyer_x_revenue'] = buyer_proba * primary_preds
+
+    return pd.DataFrame(data)

@@ -29,6 +29,7 @@ from src.training.trainer import TrainingPipeline
 from src.models.buyer_classifier import BuyerClassifier
 from src.models.revenue_regressor import ODMNRevenueRegressor
 from src.models.ensemble import StackingEnsemble
+from src.types import TimeHorizon
 
 
 def print_header(logger):
@@ -186,8 +187,11 @@ def evaluate_stage2(logger, pipeline, train_df, val_df, feature_cols):
     val_preds = pipeline.revenue_model.predict(X_val, enforce_order=True)
     
     # Evaluate D7 predictions
-    y_train_pred = train_preds.d7
-    y_val_pred = val_preds.d7
+    y_train_pred = train_preds.get(TimeHorizon.D7)
+    y_val_pred = val_preds.get(TimeHorizon.D7)
+
+    if y_train_pred is None or y_val_pred is None:
+        raise ValueError("Stage 2 predictions missing D7 horizon; cannot evaluate.")
     
     logger.info("")
     log_subsection(logger, "📈 TRAINING SET METRICS (D7 Revenue)")
@@ -253,8 +257,12 @@ def evaluate_full_pipeline(logger, pipeline, train_df, val_df, feature_cols):
     revenue_preds_val = pipeline.revenue_model.predict(X_val, enforce_order=True)
     
     # Combine: buyer_proba * revenue
-    y_train_pred = buyer_proba_train * revenue_preds_train.d7
-    y_val_pred = buyer_proba_val * revenue_preds_val.d7
+    revenue_train_d7 = revenue_preds_train.get(TimeHorizon.D7)
+    revenue_val_d7 = revenue_preds_val.get(TimeHorizon.D7)
+    if revenue_train_d7 is None or revenue_val_d7 is None:
+        raise ValueError("Full pipeline evaluation requires D7 predictions.")
+    y_train_pred = buyer_proba_train * revenue_train_d7
+    y_val_pred = buyer_proba_val * revenue_val_d7
     
     logger.info("")
     log_subsection(logger, "📈 TRAINING SET METRICS (Full Pipeline)")

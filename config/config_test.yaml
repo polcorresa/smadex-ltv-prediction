@@ -11,6 +11,8 @@ data:
   train_end: "2025-10-01-02-00"  # Only 3 hours
   val_start: "2025-10-01-03-00"
   val_end: "2025-10-01-03-00"    # Only 1 hour
+  model_start: "2025-10-01-00-00"
+  model_end: "2025-10-01-03-00"
   test_start: "2025-10-08-00-00"
   test_end: "2025-10-08-01-00"   # Only 2 hours for test
 
@@ -127,6 +129,15 @@ training:
     max_val_partitions: 1     # Max 1 partition
     random_state: 42
     fallback_val_rows: 100    # Fallback if validation is empty
+
+  split:
+    strategy: "stratified_random"
+    model_start: "2025-10-01-00-00"
+    model_end: "2025-10-01-03-00"
+    train_fraction: 0.8
+    stratify_column: "buyer_d7"
+    shuffle: true
+    random_state: 42
 
 inference:
   batch_size: 1000

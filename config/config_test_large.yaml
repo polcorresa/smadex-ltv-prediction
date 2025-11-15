@@ -12,6 +12,8 @@ data:
   train_end: "2025-10-01-23-00"
   val_start: "2025-10-02-00-00"
   val_end: "2025-10-02-05-00"
+  model_start: "2025-10-01-00-00"
+  model_end: "2025-10-02-05-00"
   test_start: "2025-10-08-00-00"
   test_end: "2025-10-08-01-00"
 
@@ -131,6 +133,15 @@ training:
     max_val_partitions: 3
     random_state: 42
     fallback_val_rows: 500
+
+  split:
+    strategy: "stratified_random"
+    model_start: "2025-10-01-00-00"
+    model_end: "2025-10-02-05-00"
+    train_fraction: 0.8
+    stratify_column: "buyer_d7"
+    shuffle: true
+    random_state: 42
 
 inference:
   batch_size: 5000

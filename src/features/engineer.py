@@ -11,6 +11,7 @@ from __future__ import annotations
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder, TargetEncoder
+from pandas.util import hash_pandas_object
 from typing import Dict, Optional
 import logging
 
@@ -127,17 +128,17 @@ class FeatureEngineer:
         
         for context in contexts:
             if context in df.columns and target_col in df.columns:
+                grouped = df.groupby(context, observed=False)[target_col]
+
                 # Local spending rank
                 df[f'{context}_local_spend_rank'] = (
-                    df.groupby(context)[target_col]
-                    .rank(pct=True)
+                    grouped.rank(pct=True)
                     .fillna(0.5)
                 )
                 
                 # Local average
                 df[f'{context}_local_avg_spend'] = (
-                    df.groupby(context)[target_col]
-                    .transform('mean')
+                    grouped.transform('mean')
                     .fillna(0)
                 )
                 
@@ -166,21 +167,32 @@ class FeatureEngineer:
         assert df is not None, "DataFrame must not be None"
         assert len(df) > 0, "DataFrame must not be empty"
         
+        metadata_cols = {'row_id', 'datetime'}
+
         if categorical_cols is None:
-            categorical_cols = []
-            
-        assert isinstance(categorical_cols, list), "categorical_cols must be a list"
-        
-        if len(categorical_cols) == 0:
+            categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
+        else:
+            categorical_cols = [col for col in categorical_cols if col in df.columns]
+            categorical_cols.extend(
+                col for col in df.select_dtypes(include=['object']).columns
+                if col not in categorical_cols
+            )
+
+        # Remove metadata/critical columns from encoding
+        categorical_cols = [col for col in categorical_cols if col not in metadata_cols]
+
+        if not categorical_cols:
             logger.info("No categorical columns to encode")
             return df
             
-        logger.info(f"Encoding categorical features: {categorical_cols}")
+        logger.info(f"Encoding categorical features (hash) for {len(categorical_cols)} columns")
         
-        # Encode categorical columns
         for col in categorical_cols:
-            if col in df.columns:
-                df = pd.get_dummies(df, columns=[col], prefix=col, drop_first=True)
+            series = df[col].fillna("__missing__").astype(str)
+            hashed = hash_pandas_object(series, index=False).astype('int64')
+            df[col] = hashed
+        
+        return df
         
         return df
     

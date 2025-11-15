@@ -14,7 +14,9 @@ import dask.dataframe as dd
 from pathlib import Path
 import yaml
 import logging
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, List
+
+from sklearn.model_selection import train_test_split
 
 from src.data.loader import DataLoader
 from src.data.preprocessor import NestedFeatureParser
@@ -22,7 +24,7 @@ from src.features.engineer import FeatureEngineer
 from src.sampling.histos import HistogramOversampling, HistogramUndersampling
 from src.models.buyer_classifier import BuyerClassifier
 from src.models.revenue_regressor import ODMNRevenueRegressor
-from src.models.ensemble import StackingEnsemble
+from src.models.ensemble import StackingEnsemble, build_meta_features
 from src.utils.logger import log_section, log_subsection, log_metric
 from src.types import TimeHorizon
 
@@ -119,11 +121,47 @@ class TrainingPipeline:
         return df.reindex(columns=columns).fillna(0)
 
     def _get_target_array(self, df: pd.DataFrame, column: str, context: str) -> np.ndarray:
-        """Return target column values, defaulting to zeros if missing."""
-        if column in df.columns:
-            return df[column].values
-        logger.warning("%s missing target column %s; returning zeros.", context, column)
-        return np.zeros(len(df), dtype=float)
+        """Return target column values, raising if missing."""
+        if column not in df.columns:
+            raise ValueError(
+                f"{context} missing required target column '{column}'. "
+                "Ensure ingestion and preprocessing preserve this target."
+            )
+        return df[column].astype(float).values
+
+    def _get_optional_target_array(
+        self,
+        df: pd.DataFrame,
+        column: str,
+        context: str
+    ) -> np.ndarray | None:
+        """Return target column values when available, otherwise None."""
+        if column not in df.columns:
+            logger.warning(
+                "%s missing optional target column '%s'; skipping related horizon.",
+                context.capitalize(),
+                column
+            )
+            return None
+        return df[column].astype(float).values
+
+    def _ensure_target_columns(self, df: pd.DataFrame, context: str) -> pd.DataFrame:
+        """Ensure essential revenue targets exist before continuing."""
+        required = ['iap_revenue_d7', 'iap_revenue_d14']
+
+        missing = [col for col in required if col not in df.columns]
+        if missing:
+            raise ValueError(
+                f"{context} dataframe missing required target columns: {missing}. "
+                "Provide real revenue data instead of relying on proxies."
+            )
+        if 'iap_revenue_d1' not in df.columns:
+            logger.info(
+                "%s dataframe lacks iap_revenue_d1; Stage 2 will continue without D1 horizon.",
+                context.capitalize()
+            )
+
+        return df
     
     def _remove_constant_columns(self, train_df: pd.DataFrame, val_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
@@ -172,31 +210,20 @@ class TrainingPipeline:
         
         return train_df, val_df
 
-    def prepare_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Load and preprocess data
-        
-        Returns:
-            train_df, val_df
-        """
-        log_section(logger, "STEP 1: DATA PREPARATION")
-
-        sampling_cfg = self.config['training'].get('sampling', {}) or {}
+    def _prepare_temporal_split_data(
+        self,
+        sampling_cfg: Dict[str, Any]
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Load data using temporal boundaries defined in the config."""
         random_state = sampling_cfg.get('random_state', 42)
-        
-        # Load data
         train_ddf, val_ddf = self.data_loader.load_train(validation_split=True)
         train_ddf = self._apply_sampling(train_ddf, 'train')
         val_ddf = self._apply_sampling(val_ddf, 'val') if val_ddf is not None else None
-        
-        # Compute to pandas (batched if needed)
+
         logger.info("Computing train data...")
-        train_df = train_ddf.compute()
-        train_df = train_df.reset_index(drop=True)
-        
+        train_df = train_ddf.compute().reset_index(drop=True)
         logger.info("Computing validation data...")
-        val_df = val_ddf.compute()
-        val_df = val_df.reset_index(drop=True)
+        val_df = val_ddf.compute().reset_index(drop=True) if val_ddf is not None else pd.DataFrame()
 
         if train_df.empty:
             raise ValueError("Training dataframe is empty after sampling; increase sampling parameters.")
@@ -208,8 +235,104 @@ class TrainingPipeline:
                 "Validation dataframe empty after sampling; using %d train rows as proxy validation set.",
                 fallback_rows
             )
-            val_df = train_df.sample(n=fallback_rows, random_state=random_state).copy()
-            val_df = val_df.reset_index(drop=True)
+            val_df = train_df.sample(n=fallback_rows, random_state=random_state).copy().reset_index(drop=True)
+
+        train_df = self._ensure_target_columns(train_df, "train")
+        val_df = self._ensure_target_columns(val_df, "validation")
+
+        return train_df, val_df
+
+    def _prepare_random_split_data(
+        self,
+        sampling_cfg: Dict[str, Any],
+        split_cfg: Dict[str, Any]
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Load a combined modeling window and create a stratified random split."""
+        random_state = split_cfg.get('random_state', sampling_cfg.get('random_state', 42))
+        train_fraction = split_cfg.get('train_fraction', 0.8)
+        assert 0.0 < train_fraction < 1.0, "train_fraction must be in (0, 1)"
+
+        model_start = split_cfg.get('model_start') or self.config['data'].get('model_start') or self.config['data']['train_start']
+        model_end = split_cfg.get('model_end') or self.config['data'].get('model_end') or self.config['data']['val_end']
+
+        logger.info(
+            "Using stratified random split between %s and %s (train_fraction=%.2f)",
+            model_start,
+            model_end,
+            train_fraction
+        )
+
+        combined_ddf, _ = self.data_loader.load_train(
+            validation_split=False,
+            start_dt=model_start,
+            end_dt=model_end
+        )
+        combined_ddf = self._apply_sampling(combined_ddf, 'train')
+
+        logger.info("Computing combined modeling data...")
+        combined_df = combined_ddf.compute().reset_index(drop=True)
+
+        if combined_df.empty:
+            raise ValueError("Combined modeling dataframe is empty; adjust modeling window or sampling fraction.")
+
+        stratify_column = split_cfg.get('stratify_column', 'buyer_d7')
+        stratify_values: Optional[pd.Series] = None
+        if stratify_column and stratify_column in combined_df.columns:
+            unique_values = combined_df[stratify_column].nunique(dropna=False)
+            if unique_values > 1:
+                stratify_values = combined_df[stratify_column]
+            else:
+                logger.warning(
+                    "Stratify column %s has %d unique values; proceeding without stratification.",
+                    stratify_column,
+                    unique_values
+                )
+        else:
+            logger.warning(
+                "Stratify column %s missing; proceeding without stratification.",
+                stratify_column
+            )
+
+        train_df, val_df = train_test_split(
+            combined_df,
+            train_size=train_fraction,
+            random_state=random_state,
+            stratify=stratify_values if stratify_values is not None else None,
+            shuffle=split_cfg.get('shuffle', True)
+        )
+
+        logger.info(
+            "Random split complete ➜ train: %d rows, val: %d rows (stratify=%s)",
+            len(train_df),
+            len(val_df),
+            stratify_column if stratify_values is not None else "none"
+        )
+
+        train_df = train_df.reset_index(drop=True)
+        val_df = val_df.reset_index(drop=True)
+
+        train_df = self._ensure_target_columns(train_df, "train")
+        val_df = self._ensure_target_columns(val_df, "validation")
+
+        return train_df, val_df
+
+    def prepare_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Load and preprocess data
+        
+        Returns:
+            train_df, val_df
+        """
+        log_section(logger, "STEP 1: DATA PREPARATION")
+
+        sampling_cfg = self.config['training'].get('sampling', {}) or {}
+        split_cfg = self.config['training'].get('split', {}) or {}
+        strategy = split_cfg.get('strategy', 'temporal').lower()
+
+        if strategy == 'stratified_random':
+            train_df, val_df = self._prepare_random_split_data(sampling_cfg, split_cfg)
+        else:
+            train_df, val_df = self._prepare_temporal_split_data(sampling_cfg)
         
         # Log detailed data information after loading
         log_subsection(logger, "📊 DATA LOADED - Summary")
@@ -381,20 +504,29 @@ class TrainingPipeline:
         numeric_cols = self._numeric_feature_columns(train_df)
         
         X_train = self._prepare_feature_matrix(train_buyers, numeric_cols, "Stage 2 train buyers")
-        # Use iap_revenue_d7 as proxy for d1 if d1 is not available
-        y_train_d1 = self._get_target_array(train_buyers, 'iap_revenue_d1', "Stage 2 train buyers")
-        if np.all(y_train_d1 == 0) and 'iap_revenue_d7' in train_buyers.columns:
-            logger.info("Using iap_revenue_d7 * 0.3 as proxy for iap_revenue_d1")
-            y_train_d1 = train_buyers['iap_revenue_d7'].values * 0.3
         y_train_d7 = self._get_target_array(train_buyers, 'iap_revenue_d7', "Stage 2 train buyers")
         y_train_d14 = self._get_target_array(train_buyers, 'iap_revenue_d14', "Stage 2 train buyers")
+        y_train_d1 = self._get_optional_target_array(train_buyers, 'iap_revenue_d1', "Stage 2 train buyers")
 
         X_val = self._prepare_feature_matrix(val_buyers, numeric_cols, "Stage 2 validation buyers")
-        y_val_d1 = self._get_target_array(val_buyers, 'iap_revenue_d1', "Stage 2 validation buyers")
-        if np.all(y_val_d1 == 0) and 'iap_revenue_d7' in val_buyers.columns:
-            y_val_d1 = val_buyers['iap_revenue_d7'].values * 0.3
         y_val_d7 = self._get_target_array(val_buyers, 'iap_revenue_d7', "Stage 2 validation buyers")
         y_val_d14 = self._get_target_array(val_buyers, 'iap_revenue_d14', "Stage 2 validation buyers")
+        y_val_d1 = self._get_optional_target_array(val_buyers, 'iap_revenue_d1', "Stage 2 validation buyers")
+
+        targets_train = {
+            TimeHorizon.D7: y_train_d7,
+            TimeHorizon.D14: y_train_d14
+        }
+        targets_val = {
+            TimeHorizon.D7: y_val_d7,
+            TimeHorizon.D14: y_val_d14
+        }
+
+        if y_train_d1 is not None and y_val_d1 is not None:
+            targets_train[TimeHorizon.D1] = y_train_d1
+            targets_val[TimeHorizon.D1] = y_val_d1
+        else:
+            logger.info("Skipping D1 revenue horizon due to missing inputs.")
         
         # Apply HistUS undersampling (reduce zero-heavy distribution)
         logger.info("Applying HistUS undersampling...")
@@ -416,20 +548,20 @@ class TrainingPipeline:
             y_train_d7
         )[0].flatten().astype(int)
         
-        y_train_d1_resampled = y_train_d1[indices]
-        y_train_d14_resampled = y_train_d14[indices]
+        resampled_targets = {
+            TimeHorizon.D7: y_train_d7_resampled,
+            TimeHorizon.D14: y_train_d14[indices]
+        }
+        if y_train_d1 is not None:
+            resampled_targets[TimeHorizon.D1] = y_train_d1[indices]
         
         # Train ODMN revenue regressor
         self.revenue_model = ODMNRevenueRegressor(self.config)
         self.revenue_model.train(
             X_train_resampled,
-            y_train_d1_resampled,
-            y_train_d7_resampled,
-            y_train_d14_resampled,
+            resampled_targets,
             X_val,
-            y_val_d1,
-            y_val_d7,
-            y_val_d14
+            targets_val
         )
         
         # Save models
@@ -456,34 +588,9 @@ class TrainingPipeline:
         buyer_proba_val = self.buyer_model.predict_proba(X_val_raw)
         revenue_preds_val = self.revenue_model.predict(X_val_raw, enforce_order=True)
         
-        # Create meta-features
         loss_config = self.config['models']['stage2_revenue']['loss']
-        
-        X_train_meta = pd.DataFrame({
-            'buyer_proba': buyer_proba_train,
-            'revenue_d1': revenue_preds_train.d1,
-            'revenue_d7': revenue_preds_train.d7,
-            'revenue_d14': revenue_preds_train.d14,
-            'weighted_revenue': (
-                loss_config['lambda_d1'] * revenue_preds_train.d1 +
-                loss_config['lambda_d7'] * revenue_preds_train.d7 +
-                loss_config['lambda_d14'] * revenue_preds_train.d14
-            ),
-            'buyer_x_revenue': buyer_proba_train * revenue_preds_train.d7
-        })
-        
-        X_val_meta = pd.DataFrame({
-            'buyer_proba': buyer_proba_val,
-            'revenue_d1': revenue_preds_val.d1,
-            'revenue_d7': revenue_preds_val.d7,
-            'revenue_d14': revenue_preds_val.d14,
-            'weighted_revenue': (
-                loss_config['lambda_d1'] * revenue_preds_val.d1 +
-                loss_config['lambda_d7'] * revenue_preds_val.d7 +
-                loss_config['lambda_d14'] * revenue_preds_val.d14
-            ),
-            'buyer_x_revenue': buyer_proba_val * revenue_preds_val.d7
-        })
+        X_train_meta = build_meta_features(buyer_proba_train, revenue_preds_train, loss_config)
+        X_val_meta = build_meta_features(buyer_proba_val, revenue_preds_val, loss_config)
         
         y_train = train_df['iap_revenue_d7'].values
         y_val = val_df['iap_revenue_d7'].values

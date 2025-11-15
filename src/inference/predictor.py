@@ -21,7 +21,7 @@ from src.data.preprocessor import NestedFeatureParser
 from src.features.engineer import FeatureEngineer
 from src.models.buyer_classifier import BuyerClassifier
 from src.models.revenue_regressor import ODMNRevenueRegressor
-from src.models.ensemble import StackingEnsemble
+from src.models.ensemble import StackingEnsemble, build_meta_features
 
 logger = logging.getLogger(__name__)
 
@@ -108,19 +108,7 @@ class FastPredictor:
         
         # Stage 3: Ensemble meta-features
         loss_config = self.config['models']['stage2_revenue']['loss']
-        
-        X_meta = pd.DataFrame({
-            'buyer_proba': buyer_proba,
-            'revenue_d1': revenue_preds.d1,
-            'revenue_d7': revenue_preds.d7,
-            'revenue_d14': revenue_preds.d14,
-            'weighted_revenue': (
-                loss_config['lambda_d1'] * revenue_preds.d1 +
-                loss_config['lambda_d7'] * revenue_preds.d7 +
-                loss_config['lambda_d14'] * revenue_preds.d14
-            ),
-            'buyer_x_revenue': buyer_proba * revenue_preds.d7
-        })
+        X_meta = build_meta_features(buyer_proba, revenue_preds, loss_config)
         
         # Final prediction
         final_preds = self.ensemble_model.predict(X_meta)

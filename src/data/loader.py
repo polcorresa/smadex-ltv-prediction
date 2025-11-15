@@ -12,7 +12,7 @@ import dask
 import dask.dataframe as dd
 import pandas as pd
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import logging
 import psutil
 
@@ -236,7 +236,9 @@ class DataLoader:
         self, 
         validation_split: bool = True,
         sample_frac: float = 1.0,
-        max_partitions: Optional[int] = None
+        max_partitions: Optional[int] = None,
+        start_dt: Optional[str] = None,
+        end_dt: Optional[str] = None
     ) -> Tuple[dd.DataFrame, Optional[dd.DataFrame]]:
         """
         Load training data with optimal Dask configuration
@@ -316,8 +318,18 @@ class DataLoader:
             return train_ddf, val_ddf
         
         else:
-            # Full training set
-            all_partitions = self._get_partition_paths(self.train_path)
+            # Combined modeling window (used for random splits)
+            effective_start = start_dt or self.config['data'].get('model_start')
+            effective_end = end_dt or self.config['data'].get('model_end')
+            all_partitions = self._get_partition_paths(self.train_path, effective_start, effective_end)
+
+            if not all_partitions:
+                logger.warning(
+                    "No partitions found for requested modeling window (%s to %s); falling back to entire train set.",
+                    effective_start,
+                    effective_end
+                )
+                all_partitions = self._get_partition_paths(self.train_path)
             
             if max_partitions:
                 all_partitions = all_partitions[:max_partitions]

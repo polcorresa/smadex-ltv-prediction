@@ -18,6 +18,8 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 from typing import Dict, Any, Optional, Tuple
 import logging
 
+from pathlib import Path
+
 from src.types import TimeHorizon, RevenuePredictions
 
 logger = logging.getLogger(__name__)
@@ -81,22 +83,20 @@ class ODMNRevenueRegressor:
             "Config must contain stage2_revenue settings"
         
         self.config = config
-        self.models: Dict[str, lgb.LGBMRegressor] = {}
+        self.models: Dict[TimeHorizon, lgb.LGBMRegressor | lgb.Booster] = {}
         self.feature_names: Optional[list[str]] = None
-        self.horizons: list[str] = config['models']['stage2_revenue']['horizons']
+        raw_horizons = config['models']['stage2_revenue'].get('horizons', [1, 7, 14])
+        self.horizons: list[TimeHorizon] = self._resolve_horizons(raw_horizons)
+        self.trained_horizons: list[TimeHorizon] = []
         
         assert len(self.horizons) > 0, "Must have at least one horizon"
     
     def train(
         self,
         X_train: pd.DataFrame,
-        y_train_d1: np.ndarray,
-        y_train_d7: np.ndarray,
-        y_train_d14: np.ndarray,
+        targets_train: Dict[TimeHorizon, np.ndarray],
         X_val: pd.DataFrame,
-        y_val_d1: np.ndarray,
-        y_val_d7: np.ndarray,
-        y_val_d14: np.ndarray,
+        targets_val: Dict[TimeHorizon, np.ndarray],
         sample_weight: Optional[np.ndarray] = None
     ) -> None:
         """
@@ -119,13 +119,16 @@ class ODMNRevenueRegressor:
         """
         # Preconditions
         assert len(X_train) > 0, "Training data must not be empty"
-        assert len(X_train) == len(y_train_d1) == len(y_train_d7) == len(y_train_d14), \
-            "All training arrays must have same length"
-        assert len(X_val) == len(y_val_d1) == len(y_val_d7) == len(y_val_d14), \
-            "All validation arrays must have same length"
-        assert np.all(y_train_d1 >= 0), "D1 targets must be non-negative"
-        assert np.all(y_train_d7 >= 0), "D7 targets must be non-negative"
-        assert np.all(y_train_d14 >= 0), "D14 targets must be non-negative"
+        assert len(targets_train) > 0, "Need at least one revenue horizon to train"
+        assert len(targets_val) > 0, "Need at least one revenue horizon for validation"
+        train_lengths = {len(arr) for arr in targets_train.values()}
+        val_lengths = {len(arr) for arr in targets_val.values()}
+        assert train_lengths == {len(X_train)}, "Training targets must align with X_train"
+        assert val_lengths == {len(X_val)}, "Validation targets must align with X_val"
+        for horizon, arr in targets_train.items():
+            assert np.all(arr >= 0), f"{horizon.display_name()} training targets must be non-negative"
+        for horizon, arr in targets_val.items():
+            assert np.all(arr >= 0), f"{horizon.display_name()} validation targets must be non-negative"
         
         if sample_weight is not None:
             assert len(sample_weight) == len(X_train), \
@@ -141,14 +144,19 @@ class ODMNRevenueRegressor:
         model_config = self.config['models']['stage2_revenue']['params'].copy()
         
         # Train models for each horizon
-        horizons_data = {
-            'd1': (y_train_d1, y_val_d1),
-            'd7': (y_train_d7, y_val_d7),
-            'd14': (y_train_d14, y_val_d14)
-        }
+        available_horizons = [
+            horizon for horizon in self.horizons
+            if horizon in targets_train and horizon in targets_val
+        ]
+        if not available_horizons:
+            raise ValueError("No overlapping horizons found between training and validation sets")
+
+        self.trained_horizons = available_horizons
         
-        for horizon, (y_train, y_val) in horizons_data.items():
-            logger.info(f"Training model for {horizon}...")
+        for horizon in available_horizons:
+            y_train = targets_train[horizon]
+            y_val = targets_val[horizon]
+            logger.info(f"Training model for {horizon.value}...")
             
             # Use 'regression' objective which works better for RMSLE
             # We'll use custom feval to monitor RMSLE during training
@@ -159,7 +167,7 @@ class ODMNRevenueRegressor:
             
             # Use standard regression without complex sample weighting
             # The full pipeline performance is what matters, not Stage 2 in isolation
-            logger.info(f"  Using standard regression objective")
+            logger.info("  Using standard regression objective")
             
             model = lgb.LGBMRegressor(**model_config_copy)
             
@@ -189,7 +197,7 @@ class ODMNRevenueRegressor:
             median_actual = np.median(y_val)
             median_pred = np.median(y_val_pred)
             
-            logger.info(f"{horizon} - Validation Metrics:")
+            logger.info(f"{horizon.value} - Validation Metrics:")
             logger.info(f"  RMSLE: {rmsle_val:.6f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
             logger.info(f"  Mean: actual=${mean_actual:.2f}, pred=${mean_pred:.2f}")
             logger.info(f"  Median: actual=${median_actual:.2f}, pred=${median_pred:.2f}")
@@ -212,28 +220,21 @@ class ODMNRevenueRegressor:
         assert len(self.models) > 0, "Models not trained yet"
         assert len(X) > 0, "Input data must not be empty"
         
-        predictions_dict: Dict[str, np.ndarray] = {}
+        predictions_dict: Dict[TimeHorizon, np.ndarray] = {}
         
-        for horizon, model in self.models.items():
-            # Clip predictions to ensure non-negative values
+        horizons_to_use = self.trained_horizons or list(self.models.keys())
+        for horizon in horizons_to_use:
+            model = self.models[horizon]
             predictions_dict[horizon] = np.clip(model.predict(X), 0, None)
         
         # Create RevenuePredictions object
-        predictions = RevenuePredictions(
-            d1=predictions_dict[TimeHorizon.D1.value],
-            d7=predictions_dict[TimeHorizon.D7.value],
-            d14=predictions_dict[TimeHorizon.D14.value]
-        )
+        predictions = RevenuePredictions(predictions_dict)
         
-        # Enforce order constraints: D1 ≤ D7 ≤ D14
+        # Enforce order constraints: ensure non-decreasing horizons when requested
         if enforce_order:
             predictions = predictions.enforce_order_constraints()
         
-        # Postcondition
-        assert np.all(predictions.d1 >= 0), "D1 predictions must be non-negative"
-        assert np.all(predictions.d7 >= 0), "D7 predictions must be non-negative"
-        assert np.all(predictions.d14 >= 0), "D14 predictions must be non-negative"
-        
+        # Postcondition handled inside RevenuePredictions
         return predictions
     
     def _enforce_order_constraints(
@@ -280,9 +281,9 @@ class ODMNRevenueRegressor:
         assert len(self.models) > 0, "No models to save"
         
         for horizon, model in self.models.items():
-            path = f"{base_path}_revenue_{horizon}.txt"
+            path = f"{base_path}_revenue_{horizon.value}.txt"
             model.booster_.save_model(path)
-            logger.info(f"Revenue model {horizon} saved to {path}")
+            logger.info(f"Revenue model {horizon.value} saved to {path}")
     
     def load(self, base_path: str) -> None:
         """
@@ -291,13 +292,56 @@ class ODMNRevenueRegressor:
         Args:
             base_path: Base path for model files
         """
-        for horizon_enum in [TimeHorizon.D1, TimeHorizon.D7, TimeHorizon.D14]:
-            horizon = horizon_enum.value
-            path = f"{base_path}_revenue_{horizon}.txt"
-            self.models[horizon] = lgb.Booster(model_file=path)
-            logger.info(f"Revenue model {horizon} loaded from {path}")
+        for horizon in self.horizons:
+            path = Path(f"{base_path}_revenue_{horizon.value}.txt")
+            if not path.exists():
+                logger.warning(
+                    "Revenue model file %s not found; skipping horizon %s",
+                    path,
+                    horizon.value
+                )
+                continue
+            self.models[horizon] = lgb.Booster(model_file=str(path))
+            logger.info(f"Revenue model {horizon.value} loaded from {path}")
         
-        assert len(self.models) == 3, "Should have loaded 3 models"
+        self.trained_horizons = list(self.models.keys())
+        assert self.models, "No revenue models were loaded"
+
+    @staticmethod
+    def _resolve_horizons(raw_horizons: list[Any]) -> list[TimeHorizon]:
+        """Normalize stage 2 horizon configuration."""
+        normalized: list[TimeHorizon] = []
+        mapping = {
+            1: TimeHorizon.D1,
+            7: TimeHorizon.D7,
+            14: TimeHorizon.D14,
+            28: TimeHorizon.D28
+        }
+        for value in raw_horizons:
+            if isinstance(value, TimeHorizon):
+                normalized.append(value)
+                continue
+            if isinstance(value, str):
+                key = value.strip().lower()
+                if key.startswith('d') and key[1:].isdigit():
+                    value = int(key[1:])
+                elif key.isdigit():
+                    value = int(key)
+                else:
+                    raise ValueError(f"Unsupported horizon specifier: {value}")
+            if isinstance(value, int):
+                mapped = mapping.get(value)
+                if mapped is None:
+                    raise ValueError(f"Unsupported horizon: {value}")
+                normalized.append(mapped)
+            else:
+                raise ValueError(f"Unsupported horizon specifier type: {type(value)}")
+
+        unique_horizons: list[TimeHorizon] = []
+        for horizon in sorted(normalized, key=lambda h: h.to_days()):
+            if horizon not in unique_horizons:
+                unique_horizons.append(horizon)
+        return unique_horizons
 
     @staticmethod
     def _rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:

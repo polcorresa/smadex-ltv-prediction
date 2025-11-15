@@ -91,6 +91,25 @@ training:
     train_frac: 0.1  # Decrease
 ```
 
+## 🎲 Randomized Train/Validation Split
+
+Smaller temporal windows could starve the buyer-only regressor, so every test config now enables a stratified random split inside the combined modeling window. Inspect the new `training.split` block:
+
+```yaml
+training:
+  split:
+    strategy: "stratified_random"  # switch back to "temporal" to disable
+    model_start: "2025-10-01-00-00"  # window that feeds both splits
+    model_end: "2025-10-01-03-00"
+    train_fraction: 0.8             # 80% rows for training
+    stratify_column: "buyer_d7"     # keeps buyer mix balanced
+```
+
+- The loader first gathers every row between `model_start` and `model_end`.
+- Rows are shuffled (seeded) and split with `sklearn.train_test_split`.
+- Stratification keeps the buyer rate similar in train and validation, giving the revenue regressor enough positive examples.
+- Set `strategy: "temporal"` if you specifically need chronological holdouts.
+
 ## 📁 Files Created
 
 ```

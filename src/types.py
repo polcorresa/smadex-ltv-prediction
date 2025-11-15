@@ -100,38 +100,66 @@ class ModelMetrics:
 @dataclass
 class RevenuePredictions:
     """Multi-horizon revenue predictions from ODMN model."""
-    d1: np.ndarray
-    d7: np.ndarray
-    d14: np.ndarray
-    
+    values: dict[TimeHorizon, np.ndarray]
+
     def __post_init__(self) -> None:
         """Validate predictions after initialization."""
-        assert len(self.d1) == len(self.d7) == len(self.d14), \
-            "All horizons must have same length"
-        assert len(self.d1) > 0, "Predictions must not be empty"
-        assert np.all(self.d1 >= 0), "D1 predictions must be non-negative"
-        assert np.all(self.d7 >= 0), "D7 predictions must be non-negative"
-        assert np.all(self.d14 >= 0), "D14 predictions must be non-negative"
-    
+        assert self.values, "Revenue predictions must contain at least one horizon"
+        lengths = {len(arr) for arr in self.values.values()}
+        assert len(lengths) == 1, "All horizon arrays must have identical length"
+        self._length = lengths.pop()
+        assert self._length > 0, "Prediction arrays must not be empty"
+        for horizon, arr in self.values.items():
+            assert np.all(arr >= 0), f"{horizon.display_name()} predictions must be non-negative"
+
+    def available_horizons(self) -> list[TimeHorizon]:
+        """Return available horizons sorted by increasing day count."""
+        return sorted(self.values.keys(), key=lambda horizon: horizon.to_days())
+
+    def has(self, horizon: TimeHorizon) -> bool:
+        """Return True if the requested horizon is present."""
+        return horizon in self.values
+
+    def get(self, horizon: TimeHorizon) -> np.ndarray | None:
+        """Return predictions for a given horizon, if available."""
+        return self.values.get(horizon)
+
+    def primary_horizon(self) -> TimeHorizon:
+        """Return preferred horizon for downstream features (defaults to D7)."""
+        if self.has(TimeHorizon.D7):
+            return TimeHorizon.D7
+        return self.available_horizons()[0]
+
     def to_dict(self) -> Dict[str, np.ndarray]:
         """Convert to dictionary for backward compatibility."""
-        return {
-            TimeHorizon.D1.value: self.d1,
-            TimeHorizon.D7.value: self.d7,
-            TimeHorizon.D14.value: self.d14
-        }
-    
+        return {horizon.value: self.values[horizon] for horizon in self.values}
+
     def enforce_order_constraints(self) -> RevenuePredictions:
-        """Ensure D1 ≤ D7 ≤ D14 ordering."""
-        d1_corrected = np.minimum(self.d1, self.d7)
-        d7_corrected = np.clip(self.d7, self.d1, self.d14)
-        d14_corrected = np.maximum(self.d14, self.d7)
-        
-        return RevenuePredictions(
-            d1=d1_corrected,
-            d7=d7_corrected,
-            d14=d14_corrected
-        )
+        """Ensure predictions are monotonically non-decreasing over time."""
+        if len(self.values) <= 1:
+            return self
+
+        corrected = {horizon: arr.copy() for horizon, arr in self.values.items()}
+        horizons = self.available_horizons()
+
+        # Forward pass: ensure later horizons are at least previous horizon
+        for idx in range(1, len(horizons)):
+            prev_horizon = horizons[idx - 1]
+            curr_horizon = horizons[idx]
+            corrected[curr_horizon] = np.maximum(corrected[curr_horizon], corrected[prev_horizon])
+
+        # Backward pass: ensure earlier horizons are not larger than later horizons
+        for idx in range(len(horizons) - 2, -1, -1):
+            curr_horizon = horizons[idx]
+            next_horizon = horizons[idx + 1]
+            corrected[curr_horizon] = np.minimum(corrected[curr_horizon], corrected[next_horizon])
+
+        return RevenuePredictions(corrected)
+
+    @property
+    def length(self) -> int:
+        """Return number of samples represented by the predictions."""
+        return self._length
 
 
 @dataclass
