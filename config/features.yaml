@@ -1,0 +1,305 @@
+# Smadex LTV Prediction - Feature Configuration
+# Comprehensive feature definitions and groups
+
+# ============================================
+# BEHAVIORAL FEATURES
+# ============================================
+behavioral:
+  engagement:
+    - avg_act_days
+    - avg_daily_sessions
+    - avg_duration
+    - session_consistency  # avg_daily_sessions * avg_act_days
+    - engagement_score     # avg_duration * avg_daily_sessions
+  
+  temporal_patterns:
+    - weeks_since_first_seen
+    - weekend_ratio
+    - hour_sin
+    - hour_cos
+    - weekday_sin
+    - weekday_cos
+    - is_morning
+    - is_afternoon
+    - is_evening
+    - is_night
+    - is_weekend
+  
+  connectivity:
+    - wifi_ratio
+    - wifi_engagement  # wifi_ratio * avg_daily_sessions
+
+# ============================================
+# PURCHASE HISTORY FEATURES
+# ============================================
+purchase_history:
+  bundle_revenue:
+    - iap_revenue_usd_bundle_mean
+    - iap_revenue_usd_bundle_std
+    - iap_revenue_usd_bundle_max
+    - iap_revenue_usd_bundle_min
+    - iap_revenue_usd_bundle_count
+  
+  category_revenue:
+    - iap_revenue_usd_category_mean
+    - iap_revenue_usd_category_std
+    - iap_revenue_usd_category_max
+    - iap_revenue_usd_category_min
+    - iap_revenue_usd_category_count
+  
+  bundle_purchases:
+    - num_buys_bundle_mean
+    - num_buys_bundle_std
+    - num_buys_bundle_max
+    - num_buys_bundle_min
+    - num_buys_bundle_count
+  
+  category_purchases:
+    - num_buys_category_mean
+    - num_buys_category_std
+    - num_buys_category_max
+    - num_buys_category_min
+    - num_buys_category_count
+  
+  recency:
+    - last_buy_days_ago
+    - last_buy_recency_weight
+    - last_buy_ts_bundle_days_ago
+    - last_buy_ts_bundle_recency_weight
+  
+  derived:
+    - purchase_recency_score  # num_buys_bundle_mean * last_buy_recency_weight
+    - category_avg_purchase_value  # iap_revenue_usd_category_mean / (num_buys_category_count + 1)
+
+# ============================================
+# WHALE INDICATORS
+# ============================================
+whale_features:
+  global:
+    - whale_users_bundle_num_buys_prank_mean
+    - whale_users_bundle_num_buys_prank_std
+    - whale_users_bundle_num_buys_prank_max
+    - whale_users_bundle_revenue_prank_mean
+    - whale_users_bundle_revenue_prank_std
+    - whale_users_bundle_revenue_prank_max
+  
+  interactions:
+    - whale_x_freq  # whale_users_bundle_revenue_prank_mean * avg_daily_sessions
+
+# ============================================
+# INSTALL HISTORY
+# ============================================
+install_features:
+  counts:
+    - bundles_ins_count
+    - bundles_ins_unique
+    - new_bundles_count
+    - new_bundles_unique
+  
+  recency:
+    - last_ins_days_ago
+    - last_ins_recency_weight
+    - last_install_ts_bundle_days_ago
+    - last_install_ts_bundle_recency_weight
+    - first_request_ts_days_ago
+    - first_request_ts_recency_weight
+  
+  velocity:
+    - install_velocity  # new_bundles_count / (weeks_since_first_seen + 1)
+
+# ============================================
+# APP CONTEXT FEATURES
+# ============================================
+app_context:
+  advertiser:
+    - advertiser_bundle_encoded
+    - advertiser_bundle_target_encoded
+    - advertiser_category_encoded
+    - advertiser_subcategory_encoded
+    - advertiser_bottom_taxonomy_level
+
+# ============================================
+# DEVICE FEATURES
+# ============================================
+device_features:
+  hardware:
+    - dev_make_encoded
+    - dev_model_encoded
+    - dev_model_target_encoded
+    - dev_os_encoded
+    - dev_osv
+    - release_date
+    - release_msrp
+  
+  device_metrics:
+    - device_spending_ratio  # iap_revenue_usd_bundle_mean / (release_msrp + 1)
+
+# ============================================
+# NETWORK & GEO FEATURES
+# ============================================
+network_geo:
+  carrier:
+    - carrier_encoded
+    - carrier_target_encoded
+  
+  location:
+    - country_encoded
+    - country_local_spend_rank
+    - country_local_avg_spend
+    - country_spend_deviation
+    - region_encoded
+    - region_local_spend_rank
+    - region_local_avg_spend
+    - region_spend_deviation
+
+# ============================================
+# CPM/CTR FEATURES
+# ============================================
+performance_metrics:
+  cpm:
+    - cpm_mean
+    - cpm_std
+    - cpm_max
+    - cpm_min
+    - cpm_count
+    - cpm_pct_rk_mean
+    - cpm_pct_rk_std
+  
+  ctr:
+    - ctr_mean
+    - ctr_std
+    - ctr_max
+    - ctr_min
+    - ctr_count
+    - ctr_pct_rk_mean
+    - ctr_pct_rk_std
+  
+  revenue:
+    - rev_by_adv_mean
+    - rev_by_adv_std
+    - rev_by_adv_max
+    - rev_by_adv_min
+
+# ============================================
+# HISTOGRAM FEATURES
+# ============================================
+histogram_features:
+  country:
+    - country_hist_top1_freq
+    - country_hist_top2_freq
+    - country_hist_top3_freq
+    - country_hist_top4_freq
+    - country_hist_top5_freq
+    - country_hist_entropy
+  
+  region:
+    - region_hist_top1_freq
+    - region_hist_top2_freq
+    - region_hist_top3_freq
+    - region_hist_entropy
+  
+  city:
+    - city_hist_top1_freq
+    - city_hist_top2_freq
+    - city_hist_top3_freq
+    - city_hist_entropy
+  
+  osv:
+    - dev_osv_hist_top1_freq
+    - dev_osv_hist_top2_freq
+    - dev_osv_hist_top3_freq
+    - dev_osv_hist_entropy
+  
+  language:
+    - dev_language_hist_top1_freq
+    - dev_language_hist_top2_freq
+    - dev_language_hist_top3_freq
+    - dev_language_hist_entropy
+
+# ============================================
+# LOCAL DISTRIBUTION FEATURES (LDAO 2025)
+# ============================================
+local_features:
+  context_ranks:
+    - dev_os_local_spend_rank
+    - dev_os_local_avg_spend
+    - dev_os_spend_deviation
+    - advertiser_category_local_spend_rank
+    - advertiser_category_local_avg_spend
+    - advertiser_category_spend_deviation
+
+# ============================================
+# TARGET VARIABLES (Not used as features)
+# ============================================
+targets:
+  revenue:
+    - iap_revenue_d1
+    - iap_revenue_d7
+    - iap_revenue_d14
+    - iap_revenue_d28
+  
+  buyer:
+    - buyer_d1
+    - buyer_d7
+    - buyer_d14
+    - buyer_d28
+  
+  retention:
+    - retention_d1
+    - retention_d7
+    - retention_d14
+
+# ============================================
+# METADATA (Not features)
+# ============================================
+metadata:
+  identifiers:
+    - row_id
+    - datetime
+    - registration
+  
+  auxiliary:
+    - buy_d7
+    - buy_d14
+    - buy_d28
+
+# ============================================
+# FEATURE SELECTION STRATEGIES
+# ============================================
+selection_strategies:
+  high_importance:
+    threshold: 0.01  # Keep features with importance >= 1%
+  
+  correlation:
+    threshold: 0.95  # Remove features with correlation >= 0.95
+  
+  variance:
+    threshold: 0.01  # Remove features with variance <= 0.01
+  
+  missing:
+    threshold: 0.5   # Remove features with missing rate >= 50%
+
+# ============================================
+# FEATURE GROUPS FOR ABLATION STUDIES
+# ============================================
+ablation_groups:
+  core:
+    - avg_daily_sessions
+    - num_buys_bundle_mean
+    - iap_revenue_usd_bundle_mean
+    - whale_users_bundle_revenue_prank_mean
+    - last_buy_recency_weight
+  
+  behavioral_only:
+    groups: [behavioral]
+  
+  purchase_only:
+    groups: [purchase_history, whale_features]
+  
+  contextual_only:
+    groups: [app_context, device_features, network_geo]
+  
+  all_engineered:
+    groups: [behavioral, purchase_history, whale_features, install_features, 
+             app_context, device_features, network_geo, performance_metrics, 
+             histogram_features, local_features]

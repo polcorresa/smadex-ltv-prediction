@@ -1,0 +1,125 @@
+# Smadex LTV Prediction Configuration
+
+data:
+  train_path: "data/raw/train"
+  test_path: "data/raw/test"
+  processed_path: "data/processed"
+  submission_path: "data/submissions"
+  
+  # Temporal splits
+  train_start: "2025-10-01-00-00"
+  train_end: "2025-10-06-23-59"
+  val_start: "2025-10-07-00-00"
+  val_end: "2025-10-07-23-59"
+  test_start: "2025-10-08-00-00"
+  test_end: "2025-10-12-23-59"
+
+features:
+  # Core feature groups
+  user_behavioral:
+    - avg_act_days
+    - avg_daily_sessions
+    - avg_duration
+    - weeks_since_first_seen
+    - weekend_ratio
+    - wifi_ratio
+  
+  purchase_history:
+    - iap_revenue_usd_bundle
+    - iap_revenue_usd_category
+    - num_buys_bundle
+    - num_buys_category
+  
+  app_context:
+    - advertiser_bundle
+    - advertiser_category
+    - advertiser_subcategory
+    - advertiser_bottom_taxonomy_level
+  
+  device:
+    - dev_make
+    - dev_model
+    - dev_os
+    - dev_osv
+    - release_date
+    - release_msrp
+  
+  network:
+    - carrier
+    - country
+    - region
+  
+  temporal:
+    - hour
+    - weekday
+
+sampling:
+  histos:
+    n_bins: 30
+    window_size: 50000
+    target_percentile: 75
+    
+models:
+  stage1_buyer:
+    type: "lightgbm"
+    params:
+      objective: "binary"
+      metric: "auc"
+      num_leaves: 31
+      learning_rate: 0.05
+      feature_fraction: 0.8
+      bagging_fraction: 0.8
+      bagging_freq: 5
+      max_depth: -1
+      min_child_samples: 20
+      n_estimators: 500
+      early_stopping_rounds: 50
+      verbose: -1
+  
+  stage2_revenue:
+    type: "odmn"  # Order-preserving multi-task
+    horizons: [1, 7, 14]
+    params:
+      objective: "huber"
+      alpha: 0.9
+      num_leaves: 63
+      learning_rate: 0.03
+      feature_fraction: 0.7
+      bagging_fraction: 0.7
+      bagging_freq: 5
+      n_estimators: 1000
+      early_stopping_rounds: 100
+      verbose: -1
+    loss:
+      lambda_order: 0.1
+      lambda_d1: 0.3
+      lambda_d7: 0.5
+      lambda_d14: 0.2
+  
+  ensemble:
+    type: "stacking"
+    base_models:
+      - type: "elastic_net"
+        alpha: 0.1
+        l1_ratio: 0.5
+      - type: "random_forest"
+        n_estimators: 100
+        max_depth: 10
+      - type: "xgboost"
+        objective: "reg:squarederror"
+        max_depth: 6
+    meta_learner:
+      type: "lightgbm"
+      objective: "huber"
+      num_leaves: 31
+
+training:
+  batch_size: 10000
+  n_folds: 5
+  random_state: 42
+  use_gpu: false
+  cache_features: true
+
+inference:
+  batch_size: 5000
+  use_cached_embeddings: true
