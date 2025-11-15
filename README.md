@@ -150,6 +150,8 @@ Critical label columns (`buyer_d*`, `iap_revenue_d*`, `row_id`, `datetime`) are 
 - Three LightGBM regressors (`d1`, `d7`, `d14`) trained with RMSLE/MAE custom eval functions.
 - Order enforcement: predictions pass through `RevenuePredictions.enforce_order_constraints()` to guarantee `d1 ≤ d7 ≤ d14`.
 - HistUS keeps the training distribution focused on informative revenue bands; sample weights hook is available for further tuning.
+- Horizon auto-selection: any horizon whose labels are missing (most often `d1`) is logged and skipped, so training never crashes when the column drops from certain slices.
+- Objective auto-switch: even if configs still declare `objective: "huber"`, the trainer overrides it with LightGBM's `regression` objective because we now rely solely on the custom RMSLE/MAE callbacks for guidance.
 
 ### 7. Stage 3 – Stacking ensemble (`src/models/ensemble.py`)
 
