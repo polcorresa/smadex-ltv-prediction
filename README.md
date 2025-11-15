@@ -208,6 +208,9 @@ uv run python scripts/compare_results.py
 | Test-set prediction | ```bash
 uv run python scripts/predict.py --max-partitions 4 --sample-frac 0.25 --limit-rows 100000
 ``` |
+| Holdout RMSLE evaluation | ```bash
+uv run python scripts/evaluate_holdout.py --split val --limit-rows 50000
+``` |
 | Kaggle validation/submit helper | ```bash
 uv run python scripts/submit_kaggle.py --dry-run --align-order --message "My experiment"
 ``` |

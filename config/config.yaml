@@ -120,15 +120,15 @@ training:
   use_gpu: false
   cache_features: false
   sampling:
-    train_frac: 0.08        # ~8% of selected partitions ≈ 5 GB total
+    train_frac: 0.2        # ~20% of selected partitions ≈ 5 GB total
     val_frac: 0.2           # keep validation manageable
-    max_train_partitions: 2  # cap partitions to limit memory
-    max_val_partitions: 1
+    max_train_partitions: 10  # cap partitions to limit memory
+    max_val_partitions: 2
     random_state: 42
 
 inference:
   batch_size: 5000
   use_cached_embeddings: true
-  max_partitions: 2          # limit Dask partitions for prediction
-  sample_frac: 0.1           # down-sample computed test set to cap RAM
+  max_partitions: 10          # limit Dask partitions for prediction
+  sample_frac: 0.2           # down-sample computed test set to cap RAM
   limit_rows: 200000         # final hard cap for submission rows during dev
