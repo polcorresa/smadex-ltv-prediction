@@ -91,7 +91,11 @@ class TrainingPipeline:
             'retention_d1', 'retention_d7', 'retention_d14'
         }
 
-        feature_cols = [col for col in df.columns if col not in excluded]
+        leakage_patterns = ('retention', 'registration', 'local_spend', 'local_avg', 'spend_deviation')
+        feature_cols = [
+            col for col in df.columns
+            if col not in excluded and not any(pattern in col for pattern in leakage_patterns)
+        ]
         numeric_cols = df[feature_cols].select_dtypes(include=[np.number]).columns.tolist()
 
         if not numeric_cols:

@@ -1,7 +1,8 @@
-"""
-Main training script
-Usage: python scripts/train.py
-"""
+"""Entrypoint for training the Smadex LTV pipeline."""
+
+from __future__ import annotations
+
+import argparse
 import sys
 from pathlib import Path
 
@@ -12,18 +13,25 @@ from src.training.trainer import TrainingPipeline
 from src.utils.logger import setup_logger
 
 
-def main():
-    # Setup logging
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train the LTV pipeline")
+    parser.add_argument(
+        "--config",
+        default="config/config.yaml",
+        help="Path to the YAML config controlling data footprint and hyperparameters"
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+
     logger = setup_logger('training', 'logs/training.log')
-    
     logger.info("Smadex LTV Prediction - Training Script")
     logger.info("=" * 80)
-    
-    # Initialize pipeline with TEST configuration
-    logger.info("Using TEST configuration: config/config_test.yaml")
-    pipeline = TrainingPipeline('config/config_test.yaml')
-    
-    # Run training
+    logger.info("Using configuration: %s", args.config)
+
+    pipeline = TrainingPipeline(args.config)
     pipeline.run()
     
     logger.info("Training completed successfully!")

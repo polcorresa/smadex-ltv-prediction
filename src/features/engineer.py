@@ -33,6 +33,10 @@ class FeatureEngineer:
         self.config = config
         self.label_encoders: Dict[str, LabelEncoder] = {}
         self.target_encoders: Dict[str, TargetEncoder] = {}
+        features_cfg = config.get('features', {}) if isinstance(config, dict) else {}
+        self.enable_local_distributions: bool = bool(
+            features_cfg.get('enable_local_distributions', False)
+        )
 
     @staticmethod
     def _to_numeric(series: pd.Series, fill_value: float = 0.0) -> pd.Series:
@@ -316,9 +320,17 @@ class FeatureEngineer:
         # 1. Interaction features
         df = self.create_interaction_features(df)
         
-        # 2. Local distribution features (only for training with target)
-        if target_col is not None and target_col in df.columns:
-            df = self.create_local_distribution_features(df, target_col)
+        # 2. Local distribution features (optional; disabled by default to avoid target leakage)
+        if self.enable_local_distributions:
+            if fit and target_col is not None and target_col in df.columns:
+                df = self.create_local_distribution_features(df, target_col)
+            else:
+                logger.info(
+                    "Skipping local distribution features (fit=%s, target_col=%s present=%s)",
+                    fit,
+                    target_col,
+                    target_col in df.columns if target_col is not None else False
+                )
         
         # 3. Categorical encoding (using empty list for now - can be extended if needed)
         df = self.encode_categorical_features(df, categorical_cols=None)

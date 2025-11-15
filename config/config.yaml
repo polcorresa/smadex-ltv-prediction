@@ -6,13 +6,13 @@ data:
   processed_path: "data/processed"
   submission_path: "data/submissions"
   
-  # Temporal splits
+  # Temporal splits (trimmed to keep total footprint ≈5 GB)
   train_start: "2025-10-01-00-00"
-  train_end: "2025-10-05-23-00"
-  val_start: "2025-10-06-00-00"
-  val_end: "2025-10-06-23-00"
+  train_end: "2025-10-02-11-00"
+  val_start: "2025-10-02-12-00"
+  val_end: "2025-10-02-17-00"
   test_start: "2025-10-08-00-00"
-  test_end: "2025-10-12-23-00"
+  test_end: "2025-10-08-23-00"
 
 features:
   # Core feature groups
@@ -120,12 +120,15 @@ training:
   use_gpu: false
   cache_features: false
   sampling:
-    train_frac: 0.2        # set <1.0 to randomly sample training data
-    val_frac: 0.5          # set <1.0 to randomly sample validation data
-    max_train_partitions: 5  # cap number of Dask partitions (e.g., 50) if RAM is limited
-    max_val_partitions: 2
+    train_frac: 0.08        # ~8% of selected partitions ≈ 5 GB total
+    val_frac: 0.2           # keep validation manageable
+    max_train_partitions: 2  # cap partitions to limit memory
+    max_val_partitions: 1
     random_state: 42
 
 inference:
   batch_size: 5000
   use_cached_embeddings: true
+  max_partitions: 2          # limit Dask partitions for prediction
+  sample_frac: 0.1           # down-sample computed test set to cap RAM
+  limit_rows: 200000         # final hard cap for submission rows during dev

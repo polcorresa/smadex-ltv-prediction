@@ -139,7 +139,20 @@ class FastPredictor:
         Returns:
             Submission dataframe with row_id and iap_revenue_d7
         """
-        logger.info("Loading test data...")
+        inference_cfg = self.config.get('inference', {})
+        if max_partitions is None:
+            max_partitions = inference_cfg.get('max_partitions')
+        if sample_frac is None:
+            sample_frac = inference_cfg.get('sample_frac')
+        if limit_rows is None:
+            limit_rows = inference_cfg.get('limit_rows')
+
+        logger.info(
+            "Loading test data (max_partitions=%s, sample_frac=%s, limit_rows=%s)...",
+            max_partitions,
+            sample_frac,
+            limit_rows
+        )
         
         data_loader = DataLoader(self.config)
         test_ddf = data_loader.load_test(max_partitions=max_partitions)
