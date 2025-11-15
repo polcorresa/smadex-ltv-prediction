@@ -20,6 +20,8 @@ import logging
 
 from pathlib import Path
 
+import json
+
 from src.types import TimeHorizon, RevenuePredictions
 
 logger = logging.getLogger(__name__)
@@ -220,6 +222,21 @@ class ODMNRevenueRegressor:
         assert len(self.models) > 0, "Models not trained yet"
         assert len(X) > 0, "Input data must not be empty"
         
+        if self.feature_names is not None:
+            missing = [col for col in self.feature_names if col not in X.columns]
+            if missing:
+                logger.warning(
+                    "Revenue regressor missing %d feature columns (examples: %s); filling with zeros.",
+                    len(missing),
+                    missing[:5]
+                )
+                X = X.copy()
+                for col in missing:
+                    X[col] = 0.0
+            X = X[self.feature_names]
+        else:
+            logger.warning("Revenue regressor lacks feature metadata; using raw input columns (%d).", len(X.columns))
+        
         predictions_dict: Dict[TimeHorizon, np.ndarray] = {}
         
         horizons_to_use = self.trained_horizons or list(self.models.keys())
@@ -280,10 +297,21 @@ class ODMNRevenueRegressor:
         """
         assert len(self.models) > 0, "No models to save"
         
+        saved_horizons: list[TimeHorizon] = []
         for horizon, model in self.models.items():
             path = f"{base_path}_revenue_{horizon.value}.txt"
             model.booster_.save_model(path)
             logger.info(f"Revenue model {horizon.value} saved to {path}")
+            saved_horizons.append(horizon)
+
+        metadata_path = Path(f"{base_path}_revenue_metadata.json")
+        metadata = {
+            "horizons": [horizon.value for horizon in saved_horizons],
+            "feature_names": self.feature_names,
+            "generated_at": pd.Timestamp.utcnow().isoformat()
+        }
+        metadata_path.write_text(json.dumps(metadata, indent=2))
+        logger.info("Revenue metadata written to %s", metadata_path)
     
     def load(self, base_path: str) -> None:
         """
@@ -292,7 +320,11 @@ class ODMNRevenueRegressor:
         Args:
             base_path: Base path for model files
         """
-        for horizon in self.horizons:
+        metadata = self._load_metadata(base_path)
+        metadata_horizons = metadata.get("horizons") if metadata else None
+        horizons_to_load = self._resolve_horizons(metadata_horizons) if metadata_horizons else self.horizons
+
+        for horizon in horizons_to_load:
             path = Path(f"{base_path}_revenue_{horizon.value}.txt")
             if not path.exists():
                 logger.warning(
@@ -305,7 +337,33 @@ class ODMNRevenueRegressor:
             logger.info(f"Revenue model {horizon.value} loaded from {path}")
         
         self.trained_horizons = list(self.models.keys())
+        if metadata and metadata.get("feature_names"):
+            self.feature_names = metadata["feature_names"]
+            logger.info("Loaded %d revenue feature columns from metadata", len(self.feature_names))
+        elif not self.feature_names:
+            logger.warning("Revenue feature metadata missing; inference will use raw columns from input data.")
         assert self.models, "No revenue models were loaded"
+
+    def _load_metadata(self, base_path: str) -> dict[str, Any] | None:
+        """Load saved metadata if available (horizons + feature names)."""
+        metadata_path = Path(f"{base_path}_revenue_metadata.json")
+        if not metadata_path.exists():
+            legacy_path = Path(f"{base_path}_revenue_horizons.json")
+            if legacy_path.exists():
+                logger.info("Using legacy horizon metadata at %s", legacy_path)
+                try:
+                    return json.loads(legacy_path.read_text())
+                except json.JSONDecodeError:
+                    logger.warning("Unable to parse legacy metadata at %s", legacy_path)
+            else:
+                logger.info("No revenue metadata found near %s", metadata_path)
+            return None
+
+        try:
+            return json.loads(metadata_path.read_text())
+        except json.JSONDecodeError as exc:
+            logger.warning("Corrupted revenue metadata at %s (%s)", metadata_path, exc)
+            return None
 
     @staticmethod
     def _resolve_horizons(raw_horizons: list[Any]) -> list[TimeHorizon]:

@@ -36,7 +36,7 @@ class BuyerClassifier:
             "Config must contain stage1_buyer settings"
         
         self.config = config
-        self.model: Optional[lgb.LGBMClassifier] = None
+        self.model: Optional[lgb.LGBMClassifier | lgb.Booster] = None
         self.feature_names: Optional[list[str]] = None
     
     def train(
@@ -142,8 +142,28 @@ class BuyerClassifier:
         """
         assert self.model is not None, "Model not trained yet"
         assert len(X) > 0, "Input data must not be empty"
-        
-        probabilities = self.model.predict_proba(X)[:, 1]
+
+        data = X
+        if self.feature_names is not None:
+            missing = [col for col in self.feature_names if col not in data.columns]
+            if missing:
+                logger.warning(
+                    "Buyer classifier missing %d feature columns (examples: %s); filling with zeros.",
+                    len(missing),
+                    missing[:5]
+                )
+                data = data.copy()
+                for col in missing:
+                    data[col] = 0.0
+            data = data[self.feature_names]
+
+        if isinstance(self.model, lgb.Booster):
+            probabilities = self.model.predict(
+                data,
+                num_iteration=self.model.best_iteration or -1
+            )
+        else:
+            probabilities = self.model.predict_proba(data)[:, 1]
         
         # Postconditions
         assert len(probabilities) == len(X), \
@@ -172,5 +192,8 @@ class BuyerClassifier:
         Args:
             path: File path for loading model
         """
-        self.model = lgb.Booster(model_file=path)
-        logger.info(f"Buyer classifier loaded from {path}")
+        booster = lgb.Booster(model_file=path)
+        self.model = booster
+        feature_names = booster.feature_name()
+        self.feature_names = list(feature_names) if feature_names is not None else None
+        logger.info(f"Buyer classifier loaded from {path} (features={len(self.feature_names or [])})")

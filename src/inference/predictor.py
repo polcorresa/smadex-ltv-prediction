@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 import yaml
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from src.data.loader import DataLoader
 from src.data.preprocessor import NestedFeatureParser
@@ -121,20 +121,49 @@ class FastPredictor:
         
         return final_preds
     
-    def predict_test_set(self) -> pd.DataFrame:
+    def predict_test_set(
+        self,
+        *,
+        max_partitions: Optional[int] = None,
+        sample_frac: Optional[float] = None,
+        limit_rows: Optional[int] = None
+    ) -> pd.DataFrame:
         """
         Predict on official test set.
         
+        Args:
+            max_partitions: Optional cap on number of Dask partitions loaded from disk.
+            sample_frac: Optional fraction (0, 1] to down-sample the computed test dataframe.
+            limit_rows: Optional hard cap on number of rows kept after sampling.
+
         Returns:
             Submission dataframe with row_id and iap_revenue_d7
         """
         logger.info("Loading test data...")
         
         data_loader = DataLoader(self.config)
-        test_ddf = data_loader.load_test()
+        test_ddf = data_loader.load_test(max_partitions=max_partitions)
         test_df = test_ddf.compute()
         
         assert len(test_df) > 0, "Test data must not be empty"
+
+        if sample_frac is not None:
+            assert 0.0 < sample_frac <= 1.0, "sample_frac must be in (0, 1]"
+            if sample_frac < 1.0:
+                random_state = self.config.get('training', {}).get('random_state', 42)
+                logger.info("Sampling test data with frac=%.3f (random_state=%s)", sample_frac, random_state)
+                test_df = test_df.sample(frac=sample_frac, random_state=random_state).reset_index(drop=True)
+                logger.info("Sampled test size: %d", len(test_df))
+
+        if limit_rows is not None:
+            assert limit_rows > 0, "limit_rows must be positive"
+            if len(test_df) > limit_rows:
+                logger.info(
+                    "Limiting test dataframe from %d to first %d rows for quicker inference",
+                    len(test_df),
+                    limit_rows
+                )
+                test_df = test_df.head(limit_rows).reset_index(drop=True)
         
         logger.info(f"Test size: {len(test_df)}")
         

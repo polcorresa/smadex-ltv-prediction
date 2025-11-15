@@ -119,7 +119,12 @@ class FeatureEngineer:
         """
         assert df is not None, "DataFrame must not be None"
         assert len(df) > 0, "DataFrame must not be empty"
-        assert target_col is not None, "Target column must not be None"
+        if target_col is None or target_col not in df.columns:
+            logger.info(
+                "Skipping local distribution features because target column '%s' is unavailable",
+                target_col or "<missing>"
+            )
+            return df
         
         logger.info("Creating local distribution features...")
         
@@ -294,7 +299,8 @@ class FeatureEngineer:
         """
         assert df is not None, "DataFrame must not be None"
         assert len(df) > 0, "DataFrame must not be empty"
-        assert target_col is not None, "Target column must not be None"
+        if fit:
+            assert target_col is not None, "Target column must be provided when fit=True"
         assert isinstance(fit, bool), "fit must be a boolean"
         
         # Identify critical columns to preserve
@@ -311,7 +317,7 @@ class FeatureEngineer:
         df = self.create_interaction_features(df)
         
         # 2. Local distribution features (only for training with target)
-        if target_col in df.columns:
+        if target_col is not None and target_col in df.columns:
             df = self.create_local_distribution_features(df, target_col)
         
         # 3. Categorical encoding (using empty list for now - can be extended if needed)

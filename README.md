@@ -180,6 +180,7 @@ Critical label columns (`buyer_d*`, `iap_revenue_d*`, `row_id`, `datetime`) are 
 
 - `FastPredictor` reloads trained artefacts, runs the same preprocessing + feature engineering stack (with `fit=False`), and produces predictions for any dataframe.
 - `predict_test_set()` loads the official test partitions via `DataLoader`, runs inference, and writes `data/submissions/submission.csv` with `row_id` + `iap_revenue_d7`.
+- Runtime controls: `scripts/predict.py` now accepts `--max-partitions`, `--sample-frac`, and `--limit-rows` to keep experiments nimble. Use `--sample-frac 0.1 --limit-rows 50000` while iterating, then rerun without limits for the final submission.
 - Latency stats (seconds + ms per sample) are logged for capacity planning.
 
 ### 11. Dashboard (`frontend/app.py`)
@@ -205,7 +206,10 @@ uv run python scripts/test_model_validation.py config/config_test_medium.yaml
 uv run python scripts/compare_results.py
 ``` |
 | Test-set prediction | ```bash
-uv run python scripts/predict.py
+uv run python scripts/predict.py --max-partitions 4 --sample-frac 0.25 --limit-rows 100000
+``` |
+| Kaggle validation/submit helper | ```bash
+uv run python scripts/submit_kaggle.py --dry-run --align-order --message "My experiment"
 ``` |
 | Cached evaluation demo | ```bash
 uv run python scripts/evaluate.py
