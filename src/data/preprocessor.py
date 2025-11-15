@@ -1,9 +1,16 @@
 """
-Preprocessing for nested data structures (dicts, lists, tuples) - OPTIMIZED FOR DASK
+Preprocessing for nested data structures (dicts, lists, tuples) - OPTIMIZED FOR DASK.
+
+Following ArjanCodes best practices:
+- Complete type hints
+- Precondition/postcondition assertions
+- Clear parameter validation
 """
+from __future__ import annotations
+
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List
+from typing import Dict, Any, Optional
 import logging
 from .missing_handler import MissingValueHandler
 
@@ -11,11 +18,11 @@ logger = logging.getLogger(__name__)
 
 
 class NestedFeatureParser:
-    """Parse complex nested features in Smadex dataset - DASK OPTIMIZED"""
+    """Parse complex nested features in Smadex dataset - DASK OPTIMIZED."""
     
-    def __init__(self, config: dict = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         """
-        Initialize parser
+        Initialize parser.
         
         Args:
             config: Configuration dictionary (optional)
@@ -27,14 +34,22 @@ class NestedFeatureParser:
     def parse_dict_features(
         df: pd.DataFrame, 
         column: str, 
-        aggregations: List[str] = ['mean', 'std', 'max', 'min']
+        aggregations: list[str] = ['mean', 'std', 'max', 'min']
     ) -> pd.DataFrame:
         """
-        Parse dictionary/map columns (e.g., iap_revenue_usd_bundle)
+        Parse dictionary/map columns (e.g., iap_revenue_usd_bundle).
         
-        OPTIMIZED: Vectorized operations, no Python loops
-        PRESERVES REVENUE DATA: Creates aggregated features before dropping original
+        OPTIMIZED: Vectorized operations, no Python loops, uses pd.concat to avoid fragmentation.
+        PRESERVES REVENUE DATA: Creates aggregated features before dropping original.
         
+        Args:
+            df: Input dataframe
+            column: Column name containing dictionary data
+            aggregations: List of aggregation functions to apply
+            
+        Returns:
+            DataFrame with dictionary column expanded to aggregated features
+            
         Example:
             {'bundle_a': 10.5, 'bundle_b': 3.2} -> 
             {
@@ -45,6 +60,10 @@ class NestedFeatureParser:
                 'bundle_count': 2
             }
         """
+        assert df is not None, "DataFrame must not be None"
+        assert column is not None, "Column name must not be None"
+        assert len(aggregations) > 0, "Must have at least one aggregation"
+        
         if column not in df.columns:
             return df
         
@@ -53,26 +72,33 @@ class NestedFeatureParser:
             lambda x: list(x.values()) if isinstance(x, dict) and x else []
         )
         
+        # Collect all new columns in a dictionary to avoid fragmentation
+        new_columns = {}
+        
         # Compute aggregations (vectorized NumPy operations)
         if 'mean' in aggregations:
-            df[f'{column}_mean'] = values.apply(
+            new_columns[f'{column}_mean'] = values.apply(
                 lambda x: np.mean(x) if x else 0.0
             )
         if 'std' in aggregations:
-            df[f'{column}_std'] = values.apply(
+            new_columns[f'{column}_std'] = values.apply(
                 lambda x: np.std(x) if len(x) > 1 else 0.0
             )
         if 'max' in aggregations:
-            df[f'{column}_max'] = values.apply(
+            new_columns[f'{column}_max'] = values.apply(
                 lambda x: np.max(x) if x else 0.0
             )
         if 'min' in aggregations:
-            df[f'{column}_min'] = values.apply(
+            new_columns[f'{column}_min'] = values.apply(
                 lambda x: np.min(x) if x else 0.0
             )
         
         # Count non-zero entries (important for sparse revenue data)
-        df[f'{column}_count'] = values.apply(len)
+        new_columns[f'{column}_count'] = values.apply(len)
+        
+        # Concatenate all new columns at once to avoid fragmentation
+        new_df = pd.DataFrame(new_columns, index=df.index)
+        df = pd.concat([df, new_df], axis=1)
         
         # Drop original column AFTER extracting features (saves memory)
         df = df.drop(columns=[column])
@@ -85,8 +111,15 @@ class NestedFeatureParser:
         column: str
     ) -> pd.DataFrame:
         """
-        Parse list columns (e.g., bundles_ins) - OPTIMIZED
+        Parse list columns (e.g., bundles_ins) - OPTIMIZED.
         
+        Args:
+            df: Input dataframe
+            column: Column name containing list data
+            
+        Returns:
+            DataFrame with list column expanded to count and unique count features
+            
         Example:
             ['bundle_a', 'bundle_b', 'bundle_c'] ->
             {
@@ -94,17 +127,46 @@ class NestedFeatureParser:
                 'bundles_ins_unique': 3
             }
         """
+        assert df is not None, "DataFrame must not be None"
+        assert column is not None, "Column name must not be None"
+        
         if column not in df.columns:
             return df
         
+        # Collect new columns to avoid fragmentation
+        new_columns = {}
+        
         # Vectorized operations
-        df[f'{column}_count'] = df[column].apply(
-            lambda x: len(x) if isinstance(x, (list, tuple)) else 0
+        new_columns[f'{column}_count'] = df[column].apply(
+            lambda x: len(x) if isinstance(x, (list, tuple)) or (hasattr(x, '__len__') and hasattr(x, 'tolist')) else 0
         )
         
-        df[f'{column}_unique'] = df[column].apply(
-            lambda x: len(set(x)) if isinstance(x, (list, tuple)) else 0
-        )
+        # Handle unique counts safely (some lists contain unhashable items)
+        def safe_unique_count(x):
+            if not isinstance(x, (list, tuple)):
+                # Handle numpy arrays
+                if hasattr(x, '__len__') and hasattr(x, 'tolist'):
+                    try:
+                        x = x.tolist()
+                    except:
+                        return 0
+                else:
+                    return 0
+            try:
+                # Try to use set for hashable items
+                return len(set(x))
+            except TypeError:
+                # Fallback: count unique by converting to strings or just return count
+                try:
+                    return len(set(str(item) for item in x))
+                except:
+                    return len(x)  # Just return total count if unique fails
+        
+        new_columns[f'{column}_unique'] = df[column].apply(safe_unique_count)
+        
+        # Concatenate all new columns at once
+        new_df = pd.DataFrame(new_columns, index=df.index)
+        df = pd.concat([df, new_df], axis=1)
         
         df = df.drop(columns=[column])
         return df
@@ -115,8 +177,15 @@ class NestedFeatureParser:
         column: str
     ) -> pd.DataFrame:
         """
-        Parse session columns (list of tuples with counts) - OPTIMIZED
+        Parse session columns (list of tuples with counts) - OPTIMIZED.
         
+        Args:
+            df: Input dataframe
+            column: Column name containing session data (list of tuples)
+            
+        Returns:
+            DataFrame with session statistics extracted
+            
         Example:
             [(hash1, 5), (hash2, 3)] ->
             {
@@ -126,6 +195,9 @@ class NestedFeatureParser:
                 'avg_daily_sessions_count': 2
             }
         """
+        assert df is not None, "DataFrame must not be None"
+        assert column is not None, "Column name must not be None"
+        
         if column not in df.columns:
             return df
         
@@ -170,9 +242,17 @@ class NestedFeatureParser:
         top_k: int = 5
     ) -> pd.DataFrame:
         """
-        Parse histogram columns (e.g., country_hist) - OPTIMIZED
-        Extract top-K most frequent values + entropy
+        Parse histogram columns (e.g., country_hist) - OPTIMIZED.
+        Extract top-K most frequent values + entropy.
         
+        Args:
+            df: Input dataframe
+            column: Column name containing histogram data
+            top_k: Number of top frequencies to extract
+            
+        Returns:
+            DataFrame with histogram features (top-k frequencies and entropy)
+            
         Example:
             {'US': 100, 'UK': 50, 'DE': 30} ->
             {
@@ -181,6 +261,10 @@ class NestedFeatureParser:
                 'country_hist_entropy': 1.23
             }
         """
+        assert df is not None, "DataFrame must not be None"
+        assert column is not None, "Column name must not be None"
+        assert top_k > 0, "top_k must be positive"
+        
         if column not in df.columns:
             return df
         
@@ -230,8 +314,16 @@ class NestedFeatureParser:
         reference_date: str = "2025-10-08"
     ) -> pd.DataFrame:
         """
-        Parse timestamp columns to recency features - OPTIMIZED
+        Parse timestamp columns to recency features - OPTIMIZED.
         
+        Args:
+            df: Input dataframe
+            column: Column name containing timestamp data
+            reference_date: Reference date for calculating recency
+            
+        Returns:
+            DataFrame with timestamp converted to days_ago and recency_weight
+            
         Example:
             last_buy_ts_bundle: '2025-09-15' ->
             {
@@ -239,6 +331,10 @@ class NestedFeatureParser:
                 'last_buy_recency_weight': 0.48  # exp(-23/30)
             }
         """
+        assert df is not None, "DataFrame must not be None"
+        assert column is not None, "Column name must not be None"
+        assert reference_date is not None, "Reference date must not be None"
+        
         if column not in df.columns:
             return df
         
@@ -270,10 +366,10 @@ class NestedFeatureParser:
         fit_missing_handler: bool = True
     ) -> pd.DataFrame:
         """
-        Process all nested features in dataset - DASK OPTIMIZED
+        Process all nested features in dataset - DASK OPTIMIZED.
         
-        All operations are partition-safe for Dask map_partitions
-        PRESERVES REVENUE DATA: Creates aggregated features before dropping
+        All operations are partition-safe for Dask map_partitions.
+        PRESERVES REVENUE DATA: Creates aggregated features before dropping.
         
         Args:
             df: Input dataframe (can be a Dask partition)
@@ -282,8 +378,10 @@ class NestedFeatureParser:
             fit_missing_handler: Whether to fit the missing handler (True for train, False for test)
             
         Returns:
-            Processed dataframe
+            Processed dataframe with all nested features expanded
         """
+        assert df is not None, "DataFrame must not be None"
+        assert len(df) > 0, "DataFrame must not be empty"
         
         # Create missing indicators BEFORE processing (to capture raw missingness)
         if create_missing_indicators:
@@ -293,24 +391,44 @@ class NestedFeatureParser:
         dict_cols = [
             'iap_revenue_usd_bundle',  # Revenue by bundle
             'iap_revenue_usd_category',  # Revenue by category
+            'iap_revenue_usd_category_bottom_taxonomy',  # Revenue by bottom taxonomy
             'num_buys_bundle',
             'num_buys_category',
+            'num_buys_category_bottom_taxonomy',
             'cpm',
             'ctr',
             'cpm_pct_rk',
             'ctr_pct_rk',
             'rev_by_adv',  # Revenue by advertiser
+            'rwd_prank',  # Reward prank
             'whale_users_bundle_num_buys_prank',
-            'whale_users_bundle_revenue_prank'
+            'whale_users_bundle_revenue_prank',
+            'whale_users_bundle_total_num_buys',
+            'whale_users_bundle_total_revenue',
+            'hour_ratio',
         ]
         
         for col in dict_cols:
             df = self.parse_dict_features(df, col)
         
-        # List features (install history)
+        # List features (install history, taxonomies, etc.)
         list_cols = [
             'bundles_ins',
-            'new_bundles'
+            'new_bundles',
+            'user_bundles',  # Array of bundle IDs
+            'user_bundles_l28d',  # Array of bundle IDs (last 28 days)
+            'bcat',
+            'bcat_bottom_taxonomy',
+            'bundles_cat',
+            'bundles_cat_bottom_taxonomy',
+            'first_request_ts_bundle',
+            'first_request_ts_category_bottom_taxonomy',
+            'last_buy_ts_bundle',
+            'last_buy_ts_category',
+            'last_install_ts_bundle',
+            'last_install_ts_category',
+            'user_actions_bundles_action_count',
+            'user_actions_bundles_action_last_timestamp',
         ]
         
         for col in list_cols:
@@ -318,7 +436,8 @@ class NestedFeatureParser:
         
         # Session features (list of tuples with counts)
         session_cols = [
-            'avg_daily_sessions'
+            'avg_daily_sessions',
+            'avg_duration',  # Also a list of tuples
         ]
         
         for col in session_cols:

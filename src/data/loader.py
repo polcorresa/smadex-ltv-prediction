@@ -1,13 +1,19 @@
 """
-Dask-based data loader for large parquet datasets with optimizations
+Dask-based data loader for large parquet datasets with optimizations.
+
+Following ArjanCodes best practices:
+- Complete type hints
+- Precondition/postcondition assertions
+- Clear parameter validation
 """
+from __future__ import annotations
+
 import dask
 import dask.dataframe as dd
 import pandas as pd
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, Tuple
 import logging
-import glob
 import psutil
 
 # Disable string conversion
@@ -30,12 +36,26 @@ logger = logging.getLogger(__name__)
 
 
 class DataLoader:
-    """Efficient data loader using Dask for distributed computation with optimizations"""
+    """Efficient data loader using Dask for distributed computation with optimizations."""
     
-    def __init__(self, config: dict):
+    def __init__(self, config: dict) -> None:
+        """
+        Initialize data loader.
+        
+        Args:
+            config: Configuration dictionary with data paths
+        """
+        assert config is not None, "Config must not be None"
+        assert 'data' in config, "Config must contain 'data' key"
+        assert 'train_path' in config['data'], "Config must contain train_path"
+        assert 'test_path' in config['data'], "Config must contain test_path"
+        
         self.config = config
         self.train_path = Path(config['data']['train_path'])
         self.test_path = Path(config['data']['test_path'])
+        
+        assert self.train_path.exists(), f"Train path does not exist: {self.train_path}"
+        assert self.test_path.exists(), f"Test path does not exist: {self.test_path}"
         
         # Calculate optimal blocksize based on available memory
         # Target: 100-200 MB per partition for good parallelism
@@ -47,6 +67,8 @@ class DataLoader:
             200 * 1024 * 1024,  # Max 200MB per partition
             int(available_memory * 0.8 / (n_cores * 2.5))
         )
+        
+        assert self.optimal_blocksize > 0, "Block size must be positive"
         
         logger.info(f"Initialized DataLoader with blocksize={self.optimal_blocksize / 1024 / 1024:.1f}MB, cores={n_cores}")
         

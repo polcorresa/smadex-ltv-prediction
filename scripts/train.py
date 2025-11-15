@@ -19,8 +19,9 @@ def main():
     logger.info("Smadex LTV Prediction - Training Script")
     logger.info("=" * 80)
     
-    # Initialize pipeline
-    pipeline = TrainingPipeline('config/config.yaml')
+    # Initialize pipeline with TEST configuration
+    logger.info("Using TEST configuration: config/config_test.yaml")
+    pipeline = TrainingPipeline('config/config_test.yaml')
     
     # Run training
     pipeline.run()

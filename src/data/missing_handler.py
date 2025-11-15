@@ -1,23 +1,38 @@
 """
-Comprehensive missing value handling for Smadex LTV dataset
+Comprehensive missing value handling for Smadex LTV dataset.
+
+Following ArjanCodes best practices:
+- Complete type hints
+- Enum for strategies instead of magic strings
+- Clear assertions for validation
 """
+from __future__ import annotations
+
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, Optional, Any
 import logging
+
+from src.types import ImputationStrategy
 
 logger = logging.getLogger(__name__)
 
 
 class MissingValueHandler:
-    """
-    Handle missing values (None, NaN, null) with domain-appropriate strategies
-    """
+    """Handle missing values (None, NaN, null) with domain-appropriate strategies."""
     
-    def __init__(self, config: dict):
+    def __init__(self, config: dict) -> None:
+        """
+        Initialize missing value handler.
+        
+        Args:
+            config: Configuration dictionary
+        """
+        assert config is not None, "Config must not be None"
+        
         self.config = config
-        self.imputation_values = {}
-        self.column_strategies = {}
+        self.imputation_values: Dict[str, Any] = {}
+        self.column_strategies: Dict[str, ImputationStrategy] = {}
         
     def analyze_missing(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -55,16 +70,16 @@ class MissingValueHandler:
         
         return missing_df
     
-    def _get_imputation_strategy(self, col: str, dtype: str) -> str:
+    def _get_imputation_strategy(self, col: str, dtype: str) -> ImputationStrategy:
         """
-        Determine imputation strategy based on column name and type
+        Determine imputation strategy based on column name and type.
         
-        Strategies:
-        - 'zero': Fill with 0 (counts, revenues, ratios where missing = none)
-        - 'median': Fill with median (continuous features)
-        - 'mode': Fill with most frequent (categorical)
-        - 'missing_flag': Create indicator + fill with special value
-        - 'forward_fill': Use previous value (time series)
+        Args:
+            col: Column name
+            dtype: Data type string
+            
+        Returns:
+            ImputationStrategy enum value
         """
         col_lower = col.lower()
         
@@ -72,69 +87,72 @@ class MissingValueHandler:
         if any(keyword in col_lower for keyword in [
             'revenue', 'iap', 'spend', 'buy', 'purchase', 'cpm', 'ctr'
         ]):
-            return 'zero'
+            return ImputationStrategy.ZERO
         
         # Count features -> 0 (missing means no events)
         if any(keyword in col_lower for keyword in [
             'count', 'num_', '_count', 'n_', 'total_'
         ]):
-            return 'zero'
+            return ImputationStrategy.ZERO
         
         # Ratio/percentage features -> median or 0.5
         if any(keyword in col_lower for keyword in [
             'ratio', 'pct', 'percentage', 'rate', '_prank'
         ]):
-            return 'median'
+            return ImputationStrategy.MEDIAN
         
         # Timestamp/recency features -> large value (long time ago)
         if any(keyword in col_lower for keyword in [
             'days_ago', 'last_', 'first_', 'recency'
         ]):
-            return 'large_value'
+            return ImputationStrategy.LARGE_VALUE
         
         # Behavioral aggregations -> median
         if any(keyword in col_lower for keyword in [
             'avg_', 'mean_', 'std_', 'max_', 'min_', 'median_'
         ]):
-            return 'median'
+            return ImputationStrategy.MEDIAN
         
         # Categorical features -> mode or 'missing'
         if dtype == 'object' or 'category' in dtype:
-            return 'mode'
+            return ImputationStrategy.MODE
         
         # Device/network features -> mode
         if any(keyword in col_lower for keyword in [
             'dev_', 'carrier', 'country', 'region', 'os', 'make', 'model'
         ]):
-            return 'mode'
+            return ImputationStrategy.MODE
         
         # Histogram/entropy features -> 0
         if any(keyword in col_lower for keyword in [
             'hist_', 'entropy', 'top'
         ]):
-            return 'zero'
+            return ImputationStrategy.ZERO
         
         # Encoded features -> special value
         if 'encoded' in col_lower:
-            return 'special_value'
+            return ImputationStrategy.SPECIAL_VALUE
         
         # Default: median for numeric, mode for categorical
         if 'float' in dtype or 'int' in dtype:
-            return 'median'
+            return ImputationStrategy.MEDIAN
         else:
-            return 'mode'
+            return ImputationStrategy.MODE
     
-    def fit(self, df: pd.DataFrame, verbose: bool = True) -> 'MissingValueHandler':
+    def fit(self, df: pd.DataFrame, verbose: bool = True) -> MissingValueHandler:
         """
-        Learn imputation values from training data
+        Learn imputation values from training data.
         
         Args:
             df: Training dataframe
             verbose: Print missing value statistics
             
         Returns:
-            self (for chaining)
+            Self for method chaining
         """
+        assert df is not None, "DataFrame must not be None"
+        assert len(df) > 0, "DataFrame must not be empty"
+        
         logger.info("Analyzing missing values...")
         
         # Analyze missing patterns
@@ -154,16 +172,16 @@ class MissingValueHandler:
                 
                 self.column_strategies[col] = strategy
                 
-                if strategy == 'zero':
+                if strategy == ImputationStrategy.ZERO:
                     self.imputation_values[col] = 0
                     
-                elif strategy == 'median':
+                elif strategy == ImputationStrategy.MEDIAN:
                     # Convert to numeric first
                     numeric_values = pd.to_numeric(df[col], errors='coerce')
                     median_val = numeric_values.median()
                     self.imputation_values[col] = median_val if not pd.isna(median_val) else 0
                     
-                elif strategy == 'mode':
+                elif strategy == ImputationStrategy.MODE:
                     # Get most frequent value
                     try:
                         # Filter out None/nan values first
@@ -186,11 +204,11 @@ class MissingValueHandler:
                         logger.warning(f"Could not compute mode for {col}: {e}")
                         self.imputation_values[col] = 'missing' if dtype == 'object' else 0
                         
-                elif strategy == 'large_value':
+                elif strategy == ImputationStrategy.LARGE_VALUE:
                     # For recency features, use a large number (e.g., 9999 days)
                     self.imputation_values[col] = 9999
                     
-                elif strategy == 'special_value':
+                elif strategy == ImputationStrategy.SPECIAL_VALUE:
                     # For encoded features, use -1 (outside normal range)
                     self.imputation_values[col] = -1
                     

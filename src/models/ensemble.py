@@ -1,8 +1,16 @@
 """
-Stage 3: Stacking Ensemble
-Combines predictions from buyer classifier and revenue regressor
-Based on ScienceDirect 2025 Hybrid Ensemble approach
+Stage 3: Stacking Ensemble.
+
+Combines predictions from buyer classifier and revenue regressor.
+Based on ScienceDirect 2025 Hybrid Ensemble approach.
+
+Following ArjanCodes best practices:
+- Complete type hints
+- Precondition/postcondition assertions
+- Clear error messages
 """
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import StackingRegressor, RandomForestRegressor
@@ -10,29 +18,53 @@ from sklearn.linear_model import ElasticNet
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from xgboost import XGBRegressor
 import lightgbm as lgb
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
 
 def _rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Compute RMSE with compatibility for older sklearn versions."""
+    """
+    Compute RMSE with compatibility for older sklearn versions.
+    
+    Args:
+        y_true: True target values
+        y_pred: Predicted values
+        
+    Returns:
+        RMSE score
+    """
+    assert len(y_true) == len(y_pred), "Arrays must have same length"
+    assert len(y_true) > 0, "Arrays must not be empty"
+    
     try:
-        return mean_squared_error(y_true, y_pred, squared=False)
+        result = mean_squared_error(y_true, y_pred, squared=False)
     except TypeError:
-        return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+        result = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+    
+    assert result >= 0.0, "RMSE must be non-negative"
+    return result
 
 
 class StackingEnsemble:
     """
-    Stacking ensemble for final revenue prediction
-    Combines buyer probability + multi-horizon revenue predictions
+    Stacking ensemble for final revenue prediction.
+    
+    Combines buyer probability + multi-horizon revenue predictions.
     """
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any]) -> None:
+        """
+        Initialize stacking ensemble.
+        
+        Args:
+            config: Configuration dictionary
+        """
+        assert config is not None, "Config must not be None"
+        
         self.config = config
-        self.ensemble = None
+        self.ensemble: Optional[StackingRegressor] = None
     
     def train(
         self,
@@ -40,9 +72,9 @@ class StackingEnsemble:
         y_train: np.ndarray,
         X_val: pd.DataFrame,
         y_val: np.ndarray
-    ):
+    ) -> None:
         """
-        Train stacking ensemble
+        Train stacking ensemble.
         
         Args:
             X_train: Meta-features (buyer_proba, d1_pred, d7_pred, d14_pred, ...)
@@ -50,6 +82,15 @@ class StackingEnsemble:
             X_val: Validation meta-features
             y_val: Validation target
         """
+        # Preconditions
+        assert len(X_train) > 0, "Training data must not be empty"
+        assert len(X_train) == len(y_train), \
+            "X_train and y_train must have same length"
+        assert len(X_val) == len(y_val), \
+            "X_val and y_val must have same length"
+        assert np.all(y_train >= 0), "Revenue targets must be non-negative"
+        assert np.all(y_val >= 0), "Revenue targets must be non-negative"
+        
         logger.info("Training Stage 3: Stacking Ensemble")
         
         # Base models
@@ -107,26 +148,59 @@ class StackingEnsemble:
             np.log1p(np.clip(y_val_pred, 0, None))
         )
         
+        # Postconditions
+        assert rmse >= 0.0, "RMSE must be non-negative"
+        assert mae >= 0.0, "MAE must be non-negative"
+        assert msle >= 0.0, "MSLE must be non-negative"
+        
         logger.info(f"Ensemble - Validation RMSE: {rmse:.4f}, MAE: {mae:.4f}, MSLE: {msle:.6f}")
     
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        """Predict final revenue"""
-        if self.ensemble is None:
-            raise ValueError("Ensemble not trained yet")
+        """
+        Predict final revenue.
+        
+        Args:
+            X: Meta-features
+            
+        Returns:
+            Array of revenue predictions
+        """
+        assert self.ensemble is not None, "Ensemble not trained yet"
+        assert len(X) > 0, "Input data must not be empty"
         
         predictions = self.ensemble.predict(X)
         
         # Ensure non-negative
-        return np.clip(predictions, 0, None)
+        predictions = np.clip(predictions, 0, None)
+        
+        # Postconditions
+        assert len(predictions) == len(X), \
+            "Output length must match input length"
+        assert np.all(predictions >= 0), \
+            "Predictions must be non-negative"
+        
+        return predictions
     
-    def save(self, path: str):
-        """Save ensemble"""
+    def save(self, path: str) -> None:
+        """
+        Save ensemble.
+        
+        Args:
+            path: File path for saving ensemble
+        """
+        assert self.ensemble is not None, "Ensemble not trained yet"
+        
         import joblib
         joblib.dump(self.ensemble, path)
         logger.info(f"Ensemble saved to {path}")
     
-    def load(self, path: str):
-        """Load ensemble"""
+    def load(self, path: str) -> None:
+        """
+        Load ensemble.
+        
+        Args:
+            path: File path for loading ensemble
+        """
         import joblib
         self.ensemble = joblib.load(path)
         logger.info(f"Ensemble loaded from {path}")

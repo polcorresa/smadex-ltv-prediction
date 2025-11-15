@@ -1,13 +1,20 @@
 """
-Orchestrates the complete training pipeline
+Orchestrates the complete training pipeline.
+
+Following ArjanCodes best practices:
+- Complete type hints
+- Proper use of dataclasses and enums
+- Assertions for validation
 """
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 import dask.dataframe as dd
 from pathlib import Path
 import yaml
 import logging
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, Optional
 
 from src.data.loader import DataLoader
 from src.data.preprocessor import NestedFeatureParser
@@ -16,6 +23,8 @@ from src.sampling.histos import HistogramOversampling, HistogramUndersampling
 from src.models.buyer_classifier import BuyerClassifier
 from src.models.revenue_regressor import ODMNRevenueRegressor
 from src.models.ensemble import StackingEnsemble
+from src.utils.logger import log_section, log_subsection, log_metric
+from src.types import TimeHorizon
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +124,53 @@ class TrainingPipeline:
             return df[column].values
         logger.warning("%s missing target column %s; returning zeros.", context, column)
         return np.zeros(len(df), dtype=float)
+    
+    def _remove_constant_columns(self, train_df: pd.DataFrame, val_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Remove columns that have constant values (no information)
+        
+        Args:
+            train_df: Training dataframe
+            val_df: Validation dataframe
+            
+        Returns:
+            Filtered train_df, val_df
+        """
+        # Preserve critical columns
+        critical_cols = [
+            'row_id', 'datetime',
+            'buyer_d1', 'buyer_d7', 'buyer_d14', 'buyer_d28',
+            'iap_revenue_d1', 'iap_revenue_d7', 'iap_revenue_d14', 'iap_revenue_d28'
+        ]
+        
+        # Find constant columns in training data
+        constant_cols = []
+        for col in train_df.columns:
+            if col in critical_cols:
+                continue
+            try:
+                # Check if column has only 1 unique value (including NaN handling)
+                if train_df[col].nunique(dropna=False) <= 1:
+                    constant_cols.append(col)
+            except:
+                # Handle unhashable types by converting to string
+                try:
+                    if train_df[col].astype(str).nunique(dropna=False) <= 1:
+                        constant_cols.append(col)
+                except:
+                    logger.warning(f"Could not check if {col} is constant, keeping it")
+        
+        if constant_cols:
+            logger.info(f"Removing {len(constant_cols)} constant columns")
+            logger.info(f"  Examples: {constant_cols[:5]}")
+            train_df = train_df.drop(columns=constant_cols)
+            # Remove from validation as well (if they exist)
+            val_constant_cols = [c for c in constant_cols if c in val_df.columns]
+            val_df = val_df.drop(columns=val_constant_cols)
+        else:
+            logger.info("No constant columns found")
+        
+        return train_df, val_df
 
     def prepare_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
@@ -123,9 +179,7 @@ class TrainingPipeline:
         Returns:
             train_df, val_df
         """
-        logger.info("=" * 80)
-        logger.info("STEP 1: DATA PREPARATION")
-        logger.info("=" * 80)
+        log_section(logger, "STEP 1: DATA PREPARATION")
 
         sampling_cfg = self.config['training'].get('sampling', {}) or {}
         random_state = sampling_cfg.get('random_state', 42)
@@ -157,30 +211,104 @@ class TrainingPipeline:
             val_df = train_df.sample(n=fallback_rows, random_state=random_state).copy()
             val_df = val_df.reset_index(drop=True)
         
-        logger.info(f"Train size: {len(train_df)}")
-        logger.info(f"Validation size: {len(val_df)}")
+        # Log detailed data information after loading
+        log_subsection(logger, "📊 DATA LOADED - Summary")
+        logger.info(f"  📚 Train size: {len(train_df):,} rows × {len(train_df.columns)} columns")
+        logger.info(f"  🎯 Validation size: {len(val_df):,} rows × {len(val_df.columns)} columns")
+        logger.info(f"  💾 Train memory: {train_df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+        logger.info(f"  💾 Validation memory: {val_df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+        logger.info(f"  ❓ Train missing cells: {train_df.isna().sum().sum():,} ({train_df.isna().sum().sum() / train_df.size * 100:.2f}%)")
+        logger.info(f"  ❓ Validation missing cells: {val_df.isna().sum().sum():,} ({val_df.isna().sum().sum() / val_df.size * 100:.2f}%)")
+        
+        # Log target variable statistics
+        if 'buyer_d7' in train_df.columns:
+            buyer_rate = train_df['buyer_d7'].mean() * 100
+            logger.info(f"  🎯 Buyer rate (D7): {buyer_rate:.2f}%")
+        if 'iap_revenue_d7' in train_df.columns:
+            avg_revenue = train_df['iap_revenue_d7'].mean()
+            logger.info(f"  💰 Average revenue (D7): ${avg_revenue:.4f}")
+        logger.info("-" * 80)
         
         # Preprocess nested features
-        logger.info("Preprocessing nested features (train)...")
+        logger.info("")
+        logger.info("  🔧 Preprocessing nested features (train)...")
         train_df = self.preprocessor.process_all(train_df)
         
-        logger.info("Preprocessing nested features (val)...")
+        logger.info("  🔧 Preprocessing nested features (val)...")
         val_df = self.preprocessor.process_all(val_df)
         
+        # Log data after preprocessing
+        logger.info("")
+        log_subsection(logger, "🔧 DATA PREPROCESSED - Summary")
+        logger.info(f"  📚 Train size: {len(train_df):,} rows × {len(train_df.columns)} columns")
+        logger.info(f"  🎯 Validation size: {len(val_df):,} rows × {len(val_df.columns)} columns")
+        logger.info(f"  💾 Train memory: {train_df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+        logger.info(f"  💾 Validation memory: {val_df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+        logger.info(f"  ❓ Train missing cells: {train_df.isna().sum().sum():,} ({train_df.isna().sum().sum() / train_df.size * 100:.2f}%)")
+        logger.info(f"  ❓ Validation missing cells: {val_df.isna().sum().sum():,} ({val_df.isna().sum().sum() / val_df.size * 100:.2f}%)")
+        
+        # Log column types
+        numeric_cols = train_df.select_dtypes(include=[np.number]).columns
+        cat_cols = train_df.select_dtypes(include=['object', 'category']).columns
+        logger.info(f"  🔢 Numeric columns: {len(numeric_cols)}")
+        logger.info(f"  📝 Categorical columns: {len(cat_cols)}")
+        logger.info("-" * 80)
+        
         # Feature engineering
-        logger.info("Engineering features (train)...")
+        logger.info("")
+        logger.info("  ⚙️  Engineering features (train)...")
         train_df = self.feature_engineer.engineer_all(
             train_df, 
             target_col='iap_revenue_d7',
             fit=True
         )
         
-        logger.info("Engineering features (val)...")
+        logger.info("  ⚙️  Engineering features (val)...")
         val_df = self.feature_engineer.engineer_all(
             val_df,
             target_col='iap_revenue_d7',
             fit=False
         )
+        
+        # Log data after feature engineering
+        logger.info("")
+        log_subsection(logger, "⚙️  FEATURE ENGINEERING COMPLETE - Summary")
+        logger.info(f"  📚 Train size: {len(train_df):,} rows × {len(train_df.columns)} columns")
+        logger.info(f"  🎯 Validation size: {len(val_df):,} rows × {len(val_df.columns)} columns")
+        logger.info(f"  💾 Train memory: {train_df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+        logger.info(f"  💾 Validation memory: {val_df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+        
+        # Log feature groups
+        feature_groups = {
+            '💰 Revenue': len([c for c in train_df.columns if 'revenue' in c.lower()]),
+            '🛒 Buyer': len([c for c in train_df.columns if 'buyer' in c.lower() or 'buy' in c.lower()]),
+            '📱 Session': len([c for c in train_df.columns if 'session' in c.lower()]),
+            '📱 Device': len([c for c in train_df.columns if 'dev_' in c.lower()]),
+            '🕐 Temporal': len([c for c in train_df.columns if any(x in c.lower() for x in ['hour', 'day', 'weekday'])]),
+            '❓ Missing indicators': len([c for c in train_df.columns if '_is_missing' in c.lower()]),
+            '📊 Aggregated': len([c for c in train_df.columns if any(x in c for x in ['_mean', '_std', '_max', '_min', '_count'])]),
+        }
+        for group, count in feature_groups.items():
+            logger.info(f"  {group} features: {count}")
+        logger.info("-" * 80)
+        
+        # Remove constant columns
+        logger.info("")
+        logger.info("  🧹 Removing constant columns...")
+        train_df, val_df = self._remove_constant_columns(train_df, val_df)
+        logger.info(f"  ✓ After constant removal: {len(train_df.columns)} columns")
+        
+        # Check for remaining object columns
+        obj_cols = train_df.select_dtypes(include=['object']).columns.tolist()
+        metadata_cols = {'row_id', 'datetime'}
+        obj_cols = [c for c in obj_cols if c not in metadata_cols]
+        if obj_cols:
+            logger.warning(f"  ⚠️  {len(obj_cols)} object columns still present after encoding: {obj_cols[:5]}")
+        else:
+            logger.info("  ✓ All categorical columns properly encoded")
+        
+        logger.info("")
+        logger.info("=" * 80)
         
         # Cache processed data
         if self.config['training']['cache_features']:
@@ -197,9 +325,7 @@ class TrainingPipeline:
         val_df: pd.DataFrame
     ):
         """Train Stage 1: Buyer Classifier"""
-        logger.info("=" * 80)
-        logger.info("STEP 2: STAGE 1 - BUYER CLASSIFICATION")
-        logger.info("=" * 80)
+        log_section(logger, "STEP 2: STAGE 1 - BUYER CLASSIFICATION")
         
         numeric_cols = self._numeric_feature_columns(train_df)
 
@@ -243,9 +369,7 @@ class TrainingPipeline:
         val_df: pd.DataFrame
     ):
         """Train Stage 2: Revenue Regressor (ODMN)"""
-        logger.info("=" * 80)
-        logger.info("STEP 3: STAGE 2 - REVENUE REGRESSION (ODMN)")
-        logger.info("=" * 80)
+        log_section(logger, "STEP 3: STAGE 2 - REVENUE REGRESSION (ODMN)")
         
         # Filter to buyers only
         train_buyers = train_df[train_df['buyer_d7'] == 1].copy()
@@ -317,9 +441,7 @@ class TrainingPipeline:
         val_df: pd.DataFrame
     ):
         """Train Stage 3: Stacking Ensemble"""
-        logger.info("=" * 80)
-        logger.info("STEP 4: STAGE 3 - STACKING ENSEMBLE")
-        logger.info("=" * 80)
+        log_section(logger, "STEP 4: STAGE 3 - STACKING ENSEMBLE")
         
         # Get predictions from Stage 1 and Stage 2
         numeric_cols = self._numeric_feature_columns(train_df)
@@ -339,28 +461,28 @@ class TrainingPipeline:
         
         X_train_meta = pd.DataFrame({
             'buyer_proba': buyer_proba_train,
-            'revenue_d1': revenue_preds_train['d1'],
-            'revenue_d7': revenue_preds_train['d7'],
-            'revenue_d14': revenue_preds_train['d14'],
+            'revenue_d1': revenue_preds_train.d1,
+            'revenue_d7': revenue_preds_train.d7,
+            'revenue_d14': revenue_preds_train.d14,
             'weighted_revenue': (
-                loss_config['lambda_d1'] * revenue_preds_train['d1'] +
-                loss_config['lambda_d7'] * revenue_preds_train['d7'] +
-                loss_config['lambda_d14'] * revenue_preds_train['d14']
+                loss_config['lambda_d1'] * revenue_preds_train.d1 +
+                loss_config['lambda_d7'] * revenue_preds_train.d7 +
+                loss_config['lambda_d14'] * revenue_preds_train.d14
             ),
-            'buyer_x_revenue': buyer_proba_train * revenue_preds_train['d7']
+            'buyer_x_revenue': buyer_proba_train * revenue_preds_train.d7
         })
         
         X_val_meta = pd.DataFrame({
             'buyer_proba': buyer_proba_val,
-            'revenue_d1': revenue_preds_val['d1'],
-            'revenue_d7': revenue_preds_val['d7'],
-            'revenue_d14': revenue_preds_val['d14'],
+            'revenue_d1': revenue_preds_val.d1,
+            'revenue_d7': revenue_preds_val.d7,
+            'revenue_d14': revenue_preds_val.d14,
             'weighted_revenue': (
-                loss_config['lambda_d1'] * revenue_preds_val['d1'] +
-                loss_config['lambda_d7'] * revenue_preds_val['d7'] +
-                loss_config['lambda_d14'] * revenue_preds_val['d14']
+                loss_config['lambda_d1'] * revenue_preds_val.d1 +
+                loss_config['lambda_d7'] * revenue_preds_val.d7 +
+                loss_config['lambda_d14'] * revenue_preds_val.d14
             ),
-            'buyer_x_revenue': buyer_proba_val * revenue_preds_val['d7']
+            'buyer_x_revenue': buyer_proba_val * revenue_preds_val.d7
         })
         
         y_train = train_df['iap_revenue_d7'].values

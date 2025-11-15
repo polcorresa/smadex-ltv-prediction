@@ -1,6 +1,13 @@
 """
-Fast inference engine for production deployment
+Fast inference engine for production deployment.
+
+Following ArjanCodes best practices:
+- Complete type hints
+- Proper use of dataclasses
+- Assertions for validation
 """
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 import time
@@ -20,12 +27,21 @@ logger = logging.getLogger(__name__)
 
 
 class FastPredictor:
-    """Optimized inference pipeline"""
+    """Optimized inference pipeline."""
     
-    def __init__(self, config_path: str):
-        """Load trained models"""
+    def __init__(self, config_path: str) -> None:
+        """
+        Load trained models.
+        
+        Args:
+            config_path: Path to configuration file
+        """
+        assert config_path is not None, "Config path must not be None"
+        
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
+        
+        assert self.config is not None, "Config must not be None"
         
         # Initialize components
         self.preprocessor = NestedFeatureParser()
@@ -47,7 +63,7 @@ class FastPredictor:
     
     def predict(self, df: pd.DataFrame) -> np.ndarray:
         """
-        Fast inference on test data
+        Fast inference on test data.
         
         Args:
             df: Raw test data
@@ -55,19 +71,34 @@ class FastPredictor:
         Returns:
             Array of predicted iap_revenue_d7
         """
+        assert df is not None, "DataFrame must not be None"
+        assert len(df) > 0, "DataFrame must not be empty"
+        
         # Preprocess
         df = self.preprocessor.process_all(df)
         
         # Feature engineering (fit=False to use cached encoders)
-        df = self.feature_engineer.engineer_all(df, target_col=None, fit=False)
+        # Note: pass any available target column or None for test data
+        target_col = 'iap_revenue_d7' if 'iap_revenue_d7' in df.columns else None
+        df = self.feature_engineer.engineer_all(df, target_col=target_col, fit=False)
         
-        # Select features
-        feature_cols = [col for col in df.columns if col not in [
-            'row_id', 'datetime'
-        ]]
+        # Select features (exclude metadata and targets)
+        excluded_cols = {'row_id', 'datetime', 'iap_revenue_d7', 'iap_revenue_d1', 
+                        'iap_revenue_d14', 'iap_revenue_d28', 'buyer_d1', 'buyer_d7', 
+                        'buyer_d14', 'buyer_d28'}
+        feature_cols = [col for col in df.columns if col not in excluded_cols]
         
+        # Use only numeric columns
         numeric_cols = df[feature_cols].select_dtypes(include=[np.number]).columns.tolist()
+        
+        # Check for remaining object columns
+        obj_cols = df[feature_cols].select_dtypes(include=['object']).columns.tolist()
+        if obj_cols:
+            logger.warning(f"Found {len(obj_cols)} object columns during inference, dropping them: {obj_cols[:5]}")
+        
         X = df[numeric_cols].fillna(0)
+        
+        assert len(X.columns) > 0, "Must have at least one feature column"
         
         # Stage 1: Buyer probability
         buyer_proba = self.buyer_model.predict_proba(X)
@@ -80,29 +111,42 @@ class FastPredictor:
         
         X_meta = pd.DataFrame({
             'buyer_proba': buyer_proba,
-            'revenue_d1': revenue_preds['d1'],
-            'revenue_d7': revenue_preds['d7'],
-            'revenue_d14': revenue_preds['d14'],
+            'revenue_d1': revenue_preds.d1,
+            'revenue_d7': revenue_preds.d7,
+            'revenue_d14': revenue_preds.d14,
             'weighted_revenue': (
-                loss_config['lambda_d1'] * revenue_preds['d1'] +
-                loss_config['lambda_d7'] * revenue_preds['d7'] +
-                loss_config['lambda_d14'] * revenue_preds['d14']
+                loss_config['lambda_d1'] * revenue_preds.d1 +
+                loss_config['lambda_d7'] * revenue_preds.d7 +
+                loss_config['lambda_d14'] * revenue_preds.d14
             ),
-            'buyer_x_revenue': buyer_proba * revenue_preds['d7']
+            'buyer_x_revenue': buyer_proba * revenue_preds.d7
         })
         
         # Final prediction
         final_preds = self.ensemble_model.predict(X_meta)
         
+        # Postcondition
+        assert len(final_preds) == len(df), \
+            "Predictions length must match input length"
+        assert np.all(final_preds >= 0), \
+            "Predictions must be non-negative"
+        
         return final_preds
     
     def predict_test_set(self) -> pd.DataFrame:
-        """Predict on official test set"""
+        """
+        Predict on official test set.
+        
+        Returns:
+            Submission dataframe with row_id and iap_revenue_d7
+        """
         logger.info("Loading test data...")
         
         data_loader = DataLoader(self.config)
         test_ddf = data_loader.load_test()
         test_df = test_ddf.compute()
+        
+        assert len(test_df) > 0, "Test data must not be empty"
         
         logger.info(f"Test size: {len(test_df)}")
         
@@ -119,5 +163,13 @@ class FastPredictor:
             'row_id': test_df['row_id'],
             'iap_revenue_d7': predictions
         })
+        
+        # Postcondition
+        assert len(submission) == len(test_df), \
+            "Submission length must match test data"
+        assert 'row_id' in submission.columns, \
+            "Submission must contain row_id column"
+        assert 'iap_revenue_d7' in submission.columns, \
+            "Submission must contain iap_revenue_d7 column"
         
         return submission

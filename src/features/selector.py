@@ -1,15 +1,24 @@
 """
-Advanced feature selection for Smadex LTV prediction
+Advanced feature selection for Smadex LTV prediction.
+
 Implements multiple selection strategies:
 - Correlation-based filtering
 - Variance-based filtering
 - Tree-based importance (Random Forest, LightGBM)
 - Recursive Feature Elimination (RFE)
 - SHAP-based selection (Chen et al., 2025)
+
+Following ArjanCodes best practices:
+- Complete type hints
+- Enums for task types and model types
+- Dataclass for structured results
+- Assertions for validation
 """
+from __future__ import annotations
+
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.feature_selection import (
     VarianceThreshold,
@@ -24,21 +33,32 @@ from sklearn.linear_model import LassoCV
 import lightgbm as lgb
 import logging
 
+from src.types import TaskType, ModelType, FeatureSelectionReport, Threshold
+
 logger = logging.getLogger(__name__)
 
 
 class FeatureSelector:
     """
-    Comprehensive feature selection toolkit
+    Comprehensive feature selection toolkit.
+    
     Based on: Htun et al. (2023), "Survey of feature selection and 
-    extraction techniques for stock market prediction"
+    extraction techniques for stock market prediction".
     """
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any]) -> None:
+        """
+        Initialize feature selector.
+        
+        Args:
+            config: Configuration dictionary
+        """
+        assert config is not None, "Config must not be None"
+        
         self.config = config
-        self.selected_features = None
-        self.feature_importances = None
-        self.correlation_matrix = None
+        self.selected_features: Optional[list[str]] = None
+        self.feature_importances: Optional[pd.Series] = None
+        self.correlation_matrix: Optional[pd.DataFrame] = None
         
     def remove_low_variance(
         self, 
@@ -122,29 +142,34 @@ class FeatureSelector:
         self,
         X: pd.DataFrame,
         y: np.ndarray,
-        method: str = 'lightgbm',
+        method: ModelType = ModelType.LIGHTGBM,
         n_features: Optional[int] = None,
-        threshold: Optional[float] = 0.01,
-        task: str = 'classification'
-    ) -> Tuple[List[str], pd.Series]:
+        threshold: Optional[float] = Threshold.IMPORTANCE_MINIMUM,
+        task: TaskType = TaskType.CLASSIFICATION
+    ) -> Tuple[list[str], pd.Series]:
         """
-        Select features by importance scores
+        Select features by importance scores.
         
         Args:
             X: Features
             y: Target
-            method: 'lightgbm', 'random_forest', 'lasso'
+            method: Model type enum for computing importance
             n_features: Number of features to select (if None, use threshold)
             threshold: Minimum importance threshold
-            task: 'classification' or 'regression'
+            task: Task type enum (classification or regression)
         
         Returns:
-            (selected_features, importance_scores)
+            Tuple of (selected_features, importance_scores)
         """
-        logger.info(f"Selecting features by importance ({method})...")
+        assert len(X) > 0, "X must not be empty"
+        assert len(X) == len(y), "X and y must have same length"
+        assert n_features is None or n_features > 0, \
+            "n_features must be positive if specified"
         
-        if method == 'lightgbm':
-            if task == 'classification':
+        logger.info(f"Selecting features by importance ({method.value})...")
+        
+        if method == ModelType.LIGHTGBM:
+            if task == TaskType.CLASSIFICATION:
                 model = lgb.LGBMClassifier(
                     objective='binary',
                     num_leaves=31,
@@ -167,8 +192,8 @@ class FeatureSelector:
                 index=X.columns
             )
         
-        elif method == 'random_forest':
-            if task == 'classification':
+        elif method == ModelType.RANDOM_FOREST:
+            if task == TaskType.CLASSIFICATION:
                 model = RandomForestClassifier(
                     n_estimators=100,
                     max_depth=10,
@@ -189,7 +214,7 @@ class FeatureSelector:
                 index=X.columns
             )
         
-        elif method == 'lasso':
+        elif method == ModelType.LASSO:
             # Lasso regression for feature selection
             model = LassoCV(cv=5, random_state=42, n_jobs=-1)
             model.fit(X, y)
@@ -317,15 +342,15 @@ class FeatureSelector:
         self,
         X: pd.DataFrame,
         y: np.ndarray,
-        task: str = 'classification',
-        variance_threshold: float = 0.01,
-        correlation_threshold: float = 0.95,
-        importance_method: str = 'lightgbm',
-        importance_threshold: float = 0.005,
+        task: TaskType = TaskType.CLASSIFICATION,
+        variance_threshold: float = Threshold.VARIANCE_LOW,
+        correlation_threshold: float = Threshold.CORRELATION_HIGH,
+        importance_method: ModelType = ModelType.LIGHTGBM,
+        importance_threshold: float = Threshold.IMPORTANCE_MINIMUM,
         top_k: Optional[int] = None
-    ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    ) -> Tuple[pd.DataFrame, FeatureSelectionReport]:
         """
-        Comprehensive multi-stage feature selection
+        Comprehensive multi-stage feature selection.
         
         Pipeline:
         1. Remove low-variance features
@@ -335,29 +360,33 @@ class FeatureSelector:
         Args:
             X: Features
             y: Target
-            task: 'classification' or 'regression'
+            task: Task type enum (classification or regression)
             variance_threshold: Variance threshold
             correlation_threshold: Correlation threshold
-            importance_method: 'lightgbm', 'random_forest', 'lasso'
+            importance_method: Model type enum for importance
             importance_threshold: Minimum importance
             top_k: Select top-k features (overrides importance_threshold)
         
         Returns:
-            (selected_X, selection_report)
+            Tuple of (selected_X, FeatureSelectionReport)
         """
+        assert len(X) > 0, "X must not be empty"
+        assert len(X) == len(y), "X and y must have same length"
+        assert 0.0 < variance_threshold < 1.0, \
+            "variance_threshold must be in (0, 1)"
+        assert 0.0 < correlation_threshold < 1.0, \
+            "correlation_threshold must be in (0, 1)"
+        
         logger.info("=" * 80)
         logger.info("COMPREHENSIVE FEATURE SELECTION")
         logger.info("=" * 80)
         
         initial_count = X.shape[1]
-        report = {
-            'initial_features': initial_count,
-            'stages': []
-        }
+        stages = []
         
         # Stage 1: Low variance removal
         X = self.remove_low_variance(X, threshold=variance_threshold)
-        report['stages'].append({
+        stages.append({
             'stage': 'low_variance',
             'remaining': X.shape[1],
             'removed': initial_count - X.shape[1]
@@ -365,10 +394,10 @@ class FeatureSelector:
         
         # Stage 2: Correlation removal
         X = self.remove_high_correlation(X, threshold=correlation_threshold)
-        report['stages'].append({
+        stages.append({
             'stage': 'high_correlation',
             'remaining': X.shape[1],
-            'removed': report['stages'][-1]['remaining'] - X.shape[1]
+            'removed': stages[-1]['remaining'] - X.shape[1]
         })
         
         # Stage 3: Importance-based selection
@@ -382,25 +411,31 @@ class FeatureSelector:
         
         X_selected = X[selected_features]
         
-        report['stages'].append({
+        stages.append({
             'stage': 'importance',
             'remaining': X_selected.shape[1],
             'removed': X.shape[1] - X_selected.shape[1]
         })
         
-        report['final_features'] = X_selected.shape[1]
-        report['reduction_ratio'] = (initial_count - X_selected.shape[1]) / initial_count
+        # Create report using dataclass
+        report = FeatureSelectionReport(
+            initial_features=initial_count,
+            final_features=X_selected.shape[1],
+            reduction_ratio=(initial_count - X_selected.shape[1]) / initial_count,
+            stages=stages,
+            selected_features=selected_features
+        )
         
         # Store results
         self.selected_features = selected_features
         
         # Log summary
         logger.info(f"\nFeature Selection Summary:")
-        logger.info(f"  Initial: {initial_count}")
-        for stage in report['stages']:
+        logger.info(f"  Initial: {report.initial_features}")
+        for stage in report.stages:
             logger.info(f"  After {stage['stage']}: {stage['remaining']} (removed {stage['removed']})")
-        logger.info(f"  Final: {report['final_features']}")
-        logger.info(f"  Reduction: {report['reduction_ratio']:.1%}")
+        logger.info(f"  Final: {report.final_features}")
+        logger.info(f"  Reduction: {report.reduction_ratio:.1%}")
         
         # Top 20 features
         top_20 = importances.head(20)

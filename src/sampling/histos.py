@@ -1,7 +1,15 @@
 """
-Histogram-based Oversampling/Undersampling (HistOS/HistUS)
-Based on: Aminian et al., 2025, Machine Learning Journal
+Histogram-based Oversampling/Undersampling (HistOS/HistUS).
+
+Based on: Aminian et al., 2025, Machine Learning Journal.
+
+Following ArjanCodes best practices:
+- Complete type hints
+- Precondition/postcondition assertions
+- Clear parameter validation
 """
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from collections import deque
@@ -13,8 +21,9 @@ logger = logging.getLogger(__name__)
 
 class HistogramOversampling:
     """
-    HistOS: Adaptive oversampling for imbalanced regression
-    Builds incremental histograms to identify rare cases
+    HistOS: Adaptive oversampling for imbalanced regression.
+    
+    Builds incremental histograms to identify rare cases.
     """
     
     def __init__(
@@ -22,23 +31,42 @@ class HistogramOversampling:
         n_bins: int = 30,
         window_size: int = 10000,
         target_percentile: float = 75.0
-    ):
+    ) -> None:
         """
+        Initialize HistOS sampler.
+        
         Args:
             n_bins: Number of histogram bins
             window_size: Sliding window for incremental updates
             target_percentile: Target count per bin (percentile of histogram)
         """
+        assert n_bins > 0, "n_bins must be positive"
+        assert window_size > 0, "window_size must be positive"
+        assert 0.0 < target_percentile < 100.0, \
+            "target_percentile must be in (0, 100)"
+        
         self.n_bins = n_bins
         self.window_size = window_size
         self.target_percentile = target_percentile
         
-        self.histogram = None
-        self.bin_edges = None
-        self.window = deque(maxlen=window_size)
+        self.histogram: Optional[np.ndarray] = None
+        self.bin_edges: Optional[np.ndarray] = None
+        self.window: deque = deque(maxlen=window_size)
     
-    def fit(self, X: np.ndarray, y: np.ndarray) -> 'HistogramOversampling':
-        """Build histogram from training data"""
+    def fit(self, X: np.ndarray, y: np.ndarray) -> HistogramOversampling:
+        """
+        Build histogram from training data.
+        
+        Args:
+            X: Feature array
+            y: Target array
+            
+        Returns:
+            Self for method chaining
+        """
+        assert len(X) > 0, "X must not be empty"
+        assert len(X) == len(y), "X and y must have same length"
+        assert np.all(np.isfinite(y)), "y must contain only finite values"
         
         # Use target values to create bins
         self.bin_edges = np.percentile(
@@ -66,7 +94,18 @@ class HistogramOversampling:
         X: np.ndarray, 
         y: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Fit and resample data"""
+        """
+        Fit and resample data.
+        
+        Args:
+            X: Feature array
+            y: Target array
+            
+        Returns:
+            Tuple of (X_resampled, y_resampled)
+        """
+        assert len(X) > 0, "X must not be empty"
+        assert len(X) == len(y), "X and y must have same length"
         
         self.fit(X, y)
         
@@ -102,6 +141,12 @@ class HistogramOversampling:
         X_resampled = np.array(X_resampled)
         y_resampled = np.array(y_resampled)
         
+        # Postconditions
+        assert len(X_resampled) >= len(X), \
+            "Resampled data should be at least as large as original"
+        assert len(X_resampled) == len(y_resampled), \
+            "Resampled X and y must have same length"
+        
         logger.info(f"HistOS: {len(X)} -> {len(X_resampled)} samples")
         
         return X_resampled, y_resampled
@@ -109,23 +154,47 @@ class HistogramOversampling:
 
 class HistogramUndersampling:
     """
-    HistUS: Adaptive undersampling for dominant classes
-    Reduces zero-revenue dominance
+    HistUS: Adaptive undersampling for dominant classes.
+    
+    Reduces zero-revenue dominance.
     """
     
     def __init__(
         self,
         n_bins: int = 30,
         target_percentile: float = 25.0
-    ):
+    ) -> None:
+        """
+        Initialize HistUS sampler.
+        
+        Args:
+            n_bins: Number of histogram bins
+            target_percentile: Target count per bin (percentile of histogram)
+        """
+        assert n_bins > 0, "n_bins must be positive"
+        assert 0.0 < target_percentile < 100.0, \
+            "target_percentile must be in (0, 100)"
+        
         self.n_bins = n_bins
         self.target_percentile = target_percentile
         
-        self.histogram = None
-        self.bin_edges = None
+        self.histogram: Optional[np.ndarray] = None
+        self.bin_edges: Optional[np.ndarray] = None
     
-    def fit(self, X: np.ndarray, y: np.ndarray) -> 'HistogramUndersampling':
-        """Build histogram from training data"""
+    def fit(self, X: np.ndarray, y: np.ndarray) -> HistogramUndersampling:
+        """
+        Build histogram from training data.
+        
+        Args:
+            X: Feature array
+            y: Target array
+            
+        Returns:
+            Self for method chaining
+        """
+        assert len(X) > 0, "X must not be empty"
+        assert len(X) == len(y), "X and y must have same length"
+        assert np.all(np.isfinite(y)), "y must contain only finite values"
         
         # Use target values to create bins
         self.bin_edges = np.percentile(
@@ -150,7 +219,18 @@ class HistogramUndersampling:
         X: np.ndarray,
         y: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Fit and undersample data"""
+        """
+        Fit and undersample data.
+        
+        Args:
+            X: Feature array
+            y: Target array
+            
+        Returns:
+            Tuple of (X_resampled, y_resampled)
+        """
+        assert len(X) > 0, "X must not be empty"
+        assert len(X) == len(y), "X and y must have same length"
         
         self.fit(X, y)
         
@@ -189,6 +269,12 @@ class HistogramUndersampling:
         
         X_resampled = np.vstack(X_resampled)
         y_resampled = np.concatenate(y_resampled)
+        
+        # Postconditions
+        assert len(X_resampled) <= len(X), \
+            "Resampled data should be at most as large as original"
+        assert len(X_resampled) == len(y_resampled), \
+            "Resampled X and y must have same length"
         
         logger.info(f"HistUS: {len(X)} -> {len(X_resampled)} samples")
         
