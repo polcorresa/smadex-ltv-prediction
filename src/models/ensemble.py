@@ -7,12 +7,21 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import StackingRegressor, RandomForestRegressor
 from sklearn.linear_model import ElasticNet
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 from xgboost import XGBRegressor
 import lightgbm as lgb
 from typing import Dict, Any
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Compute RMSE with compatibility for older sklearn versions."""
+    try:
+        return mean_squared_error(y_true, y_pred, squared=False)
+    except TypeError:
+        return float(np.sqrt(mean_squared_error(y_true, y_pred)))
 
 
 class StackingEnsemble:
@@ -89,8 +98,7 @@ class StackingEnsemble:
         # Validation metrics
         y_val_pred = self.ensemble.predict(X_val)
         
-        from sklearn.metrics import mean_squared_error, mean_absolute_error
-        rmse = mean_squared_error(y_val, y_val_pred, squared=False)
+        rmse = _rmse(y_val, y_val_pred)
         mae = mean_absolute_error(y_val, y_val_pred)
         
         # MSLE

@@ -79,7 +79,7 @@ class ODMNRevenueRegressor:
             
             # Validation metrics
             y_val_pred = model.predict(X_val)
-            rmse = mean_squared_error(y_val, y_val_pred, squared=False)
+            rmse = self._rmse(y_val, y_val_pred)
             mae = mean_absolute_error(y_val, y_val_pred)
             
             logger.info(f"{horizon} - Validation RMSE: {rmse:.4f}, MAE: {mae:.4f}")
@@ -146,3 +146,11 @@ class ODMNRevenueRegressor:
             path = f"{base_path}_revenue_{horizon}.txt"
             self.models[horizon] = lgb.Booster(model_file=path)
             logger.info(f"Revenue model {horizon} loaded from {path}")
+
+    @staticmethod
+    def _rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        """Compute RMSE with backward compatibility for older sklearn versions."""
+        try:
+            return mean_squared_error(y_true, y_pred, squared=False)
+        except TypeError:
+            return float(np.sqrt(mean_squared_error(y_true, y_pred)))

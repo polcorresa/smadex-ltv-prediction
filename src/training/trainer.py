@@ -7,7 +7,7 @@ import dask.dataframe as dd
 from pathlib import Path
 import yaml
 import logging
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List
 
 from src.data.loader import DataLoader
 from src.data.preprocessor import NestedFeatureParser
@@ -71,6 +71,51 @@ class TrainingPipeline:
 
         return ddf
 
+    def _numeric_feature_columns(self, df: pd.DataFrame) -> List[str]:
+        """Return numeric feature columns excluding labels/metadata."""
+        excluded = {
+            'row_id', 'datetime', 'iap_revenue_d7', 'iap_revenue_d1', 'iap_revenue_d14',
+            'iap_revenue_d28', 'buyer_d1', 'buyer_d7', 'buyer_d14', 'buyer_d28',
+            'buy_d7', 'buy_d14', 'buy_d28', 'registration',
+            'retention_d1', 'retention_d7', 'retention_d14'
+        }
+
+        feature_cols = [col for col in df.columns if col not in excluded]
+        numeric_cols = df[feature_cols].select_dtypes(include=[np.number]).columns.tolist()
+
+        if not numeric_cols:
+            raise ValueError(
+                "No numeric feature columns available after preprocessing. "
+                "Increase sampling fractions or inspect feature engineering."
+            )
+
+        return numeric_cols
+
+    def _prepare_feature_matrix(
+        self,
+        df: pd.DataFrame,
+        columns: List[str],
+        context: str
+    ) -> pd.DataFrame:
+        """Align dataframe with expected columns, filling missing values."""
+        missing = [col for col in columns if col not in df.columns]
+        if missing:
+            preview = ', '.join(missing[:5])
+            logger.warning(
+                "%s missing %d feature columns (%s); filling with zeros.",
+                context,
+                len(missing),
+                preview
+            )
+        return df.reindex(columns=columns).fillna(0)
+
+    def _get_target_array(self, df: pd.DataFrame, column: str, context: str) -> np.ndarray:
+        """Return target column values, defaulting to zeros if missing."""
+        if column in df.columns:
+            return df[column].values
+        logger.warning("%s missing target column %s; returning zeros.", context, column)
+        return np.zeros(len(df), dtype=float)
+
     def prepare_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Load and preprocess data
@@ -81,6 +126,9 @@ class TrainingPipeline:
         logger.info("=" * 80)
         logger.info("STEP 1: DATA PREPARATION")
         logger.info("=" * 80)
+
+        sampling_cfg = self.config['training'].get('sampling', {}) or {}
+        random_state = sampling_cfg.get('random_state', 42)
         
         # Load data
         train_ddf, val_ddf = self.data_loader.load_train(validation_split=True)
@@ -95,6 +143,19 @@ class TrainingPipeline:
         logger.info("Computing validation data...")
         val_df = val_ddf.compute()
         val_df = val_df.reset_index(drop=True)
+
+        if train_df.empty:
+            raise ValueError("Training dataframe is empty after sampling; increase sampling parameters.")
+
+        if val_df.empty:
+            fallback_rows = sampling_cfg.get('fallback_val_rows', min(512, len(train_df)))
+            fallback_rows = max(1, min(len(train_df), fallback_rows))
+            logger.warning(
+                "Validation dataframe empty after sampling; using %d train rows as proxy validation set.",
+                fallback_rows
+            )
+            val_df = train_df.sample(n=fallback_rows, random_state=random_state).copy()
+            val_df = val_df.reset_index(drop=True)
         
         logger.info(f"Train size: {len(train_df)}")
         logger.info(f"Validation size: {len(val_df)}")
@@ -140,21 +201,12 @@ class TrainingPipeline:
         logger.info("STEP 2: STAGE 1 - BUYER CLASSIFICATION")
         logger.info("=" * 80)
         
-        # Select features
-        feature_cols = [col for col in train_df.columns if col not in [
-            'row_id', 'datetime', 'iap_revenue_d7', 'iap_revenue_d1', 'iap_revenue_d14',
-            'iap_revenue_d28', 'buyer_d1', 'buyer_d7', 'buyer_d14', 'buyer_d28',
-            'buy_d7', 'buy_d14', 'buy_d28', 'registration', 
-            'retention_d1', 'retention_d7', 'retention_d14'
-        ]]
-        
-        # Remove any remaining non-numeric
-        numeric_cols = train_df[feature_cols].select_dtypes(include=[np.number]).columns.tolist()
-        
-        X_train = train_df[numeric_cols].fillna(0)
+        numeric_cols = self._numeric_feature_columns(train_df)
+
+        X_train = self._prepare_feature_matrix(train_df, numeric_cols, "Stage 1 train")
         y_train = train_df['buyer_d7'].astype(int).values
-        
-        X_val = val_df[numeric_cols].fillna(0)
+
+        X_val = self._prepare_feature_matrix(val_df, numeric_cols, "Stage 1 validation")
         y_val = val_df['buyer_d7'].astype(int).values
         
         # Apply HistOS sampling
@@ -202,25 +254,23 @@ class TrainingPipeline:
         logger.info(f"Training on {len(train_buyers)} buyers")
         logger.info(f"Validation on {len(val_buyers)} buyers")
         
-        # Select features (same as stage 1)
-        feature_cols = [col for col in train_df.columns if col not in [
-            'row_id', 'datetime', 'iap_revenue_d7', 'iap_revenue_d1', 'iap_revenue_d14',
-            'iap_revenue_d28', 'buyer_d1', 'buyer_d7', 'buyer_d14', 'buyer_d28',
-            'buy_d7', 'buy_d14', 'buy_d28', 'registration',
-            'retention_d1', 'retention_d7', 'retention_d14'
-        ]]
+        numeric_cols = self._numeric_feature_columns(train_df)
         
-        numeric_cols = train_df[feature_cols].select_dtypes(include=[np.number]).columns.tolist()
-        
-        X_train = train_buyers[numeric_cols].fillna(0)
-        y_train_d1 = train_buyers['iap_revenue_d1'].values
-        y_train_d7 = train_buyers['iap_revenue_d7'].values
-        y_train_d14 = train_buyers['iap_revenue_d14'].values
-        
-        X_val = val_buyers[numeric_cols].fillna(0)
-        y_val_d1 = val_buyers['iap_revenue_d1'].values
-        y_val_d7 = val_buyers['iap_revenue_d7'].values
-        y_val_d14 = val_buyers['iap_revenue_d14'].values
+        X_train = self._prepare_feature_matrix(train_buyers, numeric_cols, "Stage 2 train buyers")
+        # Use iap_revenue_d7 as proxy for d1 if d1 is not available
+        y_train_d1 = self._get_target_array(train_buyers, 'iap_revenue_d1', "Stage 2 train buyers")
+        if np.all(y_train_d1 == 0) and 'iap_revenue_d7' in train_buyers.columns:
+            logger.info("Using iap_revenue_d7 * 0.3 as proxy for iap_revenue_d1")
+            y_train_d1 = train_buyers['iap_revenue_d7'].values * 0.3
+        y_train_d7 = self._get_target_array(train_buyers, 'iap_revenue_d7', "Stage 2 train buyers")
+        y_train_d14 = self._get_target_array(train_buyers, 'iap_revenue_d14', "Stage 2 train buyers")
+
+        X_val = self._prepare_feature_matrix(val_buyers, numeric_cols, "Stage 2 validation buyers")
+        y_val_d1 = self._get_target_array(val_buyers, 'iap_revenue_d1', "Stage 2 validation buyers")
+        if np.all(y_val_d1 == 0) and 'iap_revenue_d7' in val_buyers.columns:
+            y_val_d1 = val_buyers['iap_revenue_d7'].values * 0.3
+        y_val_d7 = self._get_target_array(val_buyers, 'iap_revenue_d7', "Stage 2 validation buyers")
+        y_val_d14 = self._get_target_array(val_buyers, 'iap_revenue_d14', "Stage 2 validation buyers")
         
         # Apply HistUS undersampling (reduce zero-heavy distribution)
         logger.info("Applying HistUS undersampling...")
@@ -272,22 +322,15 @@ class TrainingPipeline:
         logger.info("=" * 80)
         
         # Get predictions from Stage 1 and Stage 2
-        feature_cols = [col for col in train_df.columns if col not in [
-            'row_id', 'datetime', 'iap_revenue_d7', 'iap_revenue_d1', 'iap_revenue_d14',
-            'iap_revenue_d28', 'buyer_d1', 'buyer_d7', 'buyer_d14', 'buyer_d28',
-            'buy_d7', 'buy_d14', 'buy_d28', 'registration',
-            'retention_d1', 'retention_d7', 'retention_d14'
-        ]]
-        
-        numeric_cols = train_df[feature_cols].select_dtypes(include=[np.number]).columns.tolist()
-        
+        numeric_cols = self._numeric_feature_columns(train_df)
+
         # Train meta-features
-        X_train_raw = train_df[numeric_cols].fillna(0)
+        X_train_raw = self._prepare_feature_matrix(train_df, numeric_cols, "Stage 3 train meta")
         buyer_proba_train = self.buyer_model.predict_proba(X_train_raw)
         revenue_preds_train = self.revenue_model.predict(X_train_raw, enforce_order=True)
         
         # Validation meta-features
-        X_val_raw = val_df[numeric_cols].fillna(0)
+        X_val_raw = self._prepare_feature_matrix(val_df, numeric_cols, "Stage 3 validation meta")
         buyer_proba_val = self.buyer_model.predict_proba(X_val_raw)
         revenue_preds_val = self.revenue_model.predict(X_val_raw, enforce_order=True)
         

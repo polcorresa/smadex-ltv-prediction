@@ -19,19 +19,28 @@ class FeatureEngineer:
         self.target_encoders = {}
 
     @staticmethod
-    def _to_numeric(series: pd.Series) -> pd.Series:
-        """Safely coerce a series to numeric for arithmetic operations"""
-        return pd.to_numeric(series, errors='coerce')
+    def _to_numeric(series: pd.Series, fill_value: float = 0.0) -> pd.Series:
+        """
+        Safely coerce a series to numeric for arithmetic operations
+        
+        Args:
+            series: Input series
+            fill_value: Value to use for NaN after conversion
+            
+        Returns:
+            Numeric series with NaN filled
+        """
+        return pd.to_numeric(series, errors='coerce').fillna(fill_value)
     
     def create_interaction_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create interaction features between key variables"""
         logger.info("Creating interaction features...")
         
-        # Whale × Activity frequency
-        if 'whale_users_bundle_revenue_prank_mean' in df.columns and 'avg_daily_sessions' in df.columns:
-            whale = self._to_numeric(df['whale_users_bundle_revenue_prank_mean'])
-            freq = self._to_numeric(df['avg_daily_sessions'])
-            df['whale_x_freq'] = whale * freq
+        # Whale user frequency
+        if 'whale_users_bundle_revenue_prank_mean' in df.columns and 'avg_daily_sessions_total' in df.columns:
+            whale_score = self._to_numeric(df['whale_users_bundle_revenue_prank_mean'])
+            freq = self._to_numeric(df['avg_daily_sessions_total'])
+            df['whale_x_freq'] = whale_score * freq
         
         # Purchase history × Recency
         if 'num_buys_bundle_mean' in df.columns and 'last_buy_recency_weight' in df.columns:
@@ -193,21 +202,21 @@ class FeatureEngineer:
         logger.info("Creating aggregated behavioral features...")
         
         # Session consistency
-        if 'avg_daily_sessions' in df.columns and 'avg_act_days' in df.columns:
-            sessions = self._to_numeric(df['avg_daily_sessions'])
+        if 'avg_daily_sessions_total' in df.columns and 'avg_act_days' in df.columns:
+            sessions = self._to_numeric(df['avg_daily_sessions_total'])
             act_days = self._to_numeric(df['avg_act_days'])
             df['session_consistency'] = sessions * act_days
         
         # Engagement score
-        if 'avg_duration' in df.columns and 'avg_daily_sessions' in df.columns:
+        if 'avg_duration' in df.columns and 'avg_daily_sessions_total' in df.columns:
             duration = self._to_numeric(df['avg_duration'])
-            sessions = self._to_numeric(df['avg_daily_sessions'])
+            sessions = self._to_numeric(df['avg_daily_sessions_total'])
             df['engagement_score'] = duration * sessions
         
         # WiFi preference score
-        if 'wifi_ratio' in df.columns and 'avg_daily_sessions' in df.columns:
+        if 'wifi_ratio' in df.columns and 'avg_daily_sessions_total' in df.columns:
             wifi_ratio = self._to_numeric(df['wifi_ratio'])
-            sessions = self._to_numeric(df['avg_daily_sessions'])
+            sessions = self._to_numeric(df['avg_daily_sessions_total'])
             df['wifi_engagement'] = wifi_ratio * sessions
         
         return df
@@ -218,7 +227,28 @@ class FeatureEngineer:
         target_col: str = 'iap_revenue_d7',
         fit: bool = True
     ) -> pd.DataFrame:
-        """Apply all feature engineering steps"""
+        """
+        Apply all feature engineering steps
+        
+        CRITICAL: Preserves essential columns for training/inference:
+        - row_id: Unique identifier
+        - datetime: Temporal information  
+        - Target columns: buyer_d1, buyer_d7, buyer_d14, buyer_d28,
+                         iap_revenue_d1, iap_revenue_d7, iap_revenue_d14, iap_revenue_d28
+        """
+        # Identify critical columns to preserve
+        critical_cols = [
+            'row_id', 'datetime',
+            'buyer_d1', 'buyer_d7', 'buyer_d14', 'buyer_d28',
+            'iap_revenue_d1', 'iap_revenue_d7', 'iap_revenue_d14', 'iap_revenue_d28'
+        ]
+        existing_critical = [col for col in critical_cols if col in df.columns]
+        
+        logger.info(f"Preserving {len(existing_critical)} critical columns: {existing_critical}")
+
+        if df is None or df.empty:
+            logger.warning("FeatureEngineer received empty dataframe; skipping feature creation")
+            return df
         
         # 1. Interaction features
         df = self.create_interaction_features(df)

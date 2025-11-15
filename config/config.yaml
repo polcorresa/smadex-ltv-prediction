@@ -1,18 +1,18 @@
 # Smadex LTV Prediction Configuration
 
 data:
-  train_path: "data/raw/train"
-  test_path: "data/raw/test"
+  train_path: "data/raw/train/train"
+  test_path: "data/raw/test/test"
   processed_path: "data/processed"
   submission_path: "data/submissions"
   
   # Temporal splits
   train_start: "2025-10-01-00-00"
-  train_end: "2025-10-06-23-59"
-  val_start: "2025-10-07-00-00"
-  val_end: "2025-10-07-23-59"
+  train_end: "2025-10-05-23-00"
+  val_start: "2025-10-06-00-00"
+  val_end: "2025-10-06-23-00"
   test_start: "2025-10-08-00-00"
-  test_end: "2025-10-12-23-59"
+  test_end: "2025-10-12-23-00"
 
 features:
   # Core feature groups
@@ -118,12 +118,12 @@ training:
   n_folds: 5
   random_state: 42
   use_gpu: false
-  cache_features: true
+  cache_features: false
   sampling:
-    train_frac: 1.0        # set <1.0 to randomly sample training data
-    val_frac: 1.0          # set <1.0 to randomly sample validation data
-    max_train_partitions: 20  # cap number of Dask partitions (e.g., 50) if RAM is limited
-    max_val_partitions: 6
+    train_frac: 0.2        # set <1.0 to randomly sample training data
+    val_frac: 0.5          # set <1.0 to randomly sample validation data
+    max_train_partitions: 5  # cap number of Dask partitions (e.g., 50) if RAM is limited
+    max_val_partitions: 2
     random_state: 42
 
 inference:
