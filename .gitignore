@@ -1,0 +1,42 @@
+# Virtual environments
+.venv/
+.env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs and checkpoints
+logs/
+models/
+
+# Data artifacts
+/data/raw/
+/data/processed/
+/data/submissions/
+/data/tmp/
+
+# Parquet / large exports
+*.parquet
+*.feather
+*.csv
+*.tsv
+
+# Dask / Ray temp directories
+dask-worker-space/
+ray_results/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Build artifacts
+dist/
+build/
+*.egg-info/

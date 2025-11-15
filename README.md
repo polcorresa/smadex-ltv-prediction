@@ -14,9 +14,32 @@ Production-ready pipeline for forecasting 7-day in-app purchase revenue (`iap_re
 
 ---
 
+## Stack compliance & research lineage
+
+- **Primary framework:** The Stage‑2 regressor is built on the Kuaishou **Order-preserving Deep Multitask Network (ODMN)** described by Li et al., CIKM 2022. We retain the multi-horizon order constraints (D1 ≤ D7 ≤ D14) and ODMN-inspired losses in `src/models/revenue_regressor.py` and `src/models/losses.py`.
+- **OptDist sub-distribution selection:** Buyer-focused resampling and horizon-specific weighting follow the OptDist strategy from Weng et al., CIKM 2024, emphasizing sub-distribution targeting for high-value cohorts.
+- **2025 enhancements:** We layer **HistOS/HistUS histogram-aware sampling** (Aminian et al., MLJ 2025) and a **Hybrid stacking ensemble** (ScienceDirect Hybrid Ensemble, 2025) to stabilize zero-inflated targets and calibrate final predictions. These appear in `src/sampling/histos.py`, `src/training/trainer.py`, and `src/models/ensemble.py`.
+- **Citation:** *“We adapt the ODMN framework (Li et al., CIKM 2022) with OptDist sub-distribution selection (Weng et al., CIKM 2024) and extend it with HistOS sampling plus a stacking ensemble for Smadex 2025.”*
+
+---
+
 ## Quick start
 
-### 1. Environment setup
+### 1. Environment setup (uv recommended)
+
+```bash
+# install uv once (https://docs.astral.sh/uv/)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# create & activate a virtualenv managed by uv
+uv venv
+source .venv/bin/activate
+
+# install project dependencies from pyproject.toml
+uv pip install -e .
+```
+
+> Prefer pip? Replace the last two commands with:
 
 ```bash
 python3 -m venv .venv
