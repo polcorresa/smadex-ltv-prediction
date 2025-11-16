@@ -12,7 +12,7 @@ data:
   val_start: "2025-10-02-12-00"
   val_end: "2025-10-02-17-00"
   test_start: "2025-10-08-00-00"
-  test_end: "2025-10-08-23-00"
+  test_end: "2025-10-11-23-00"
   
   # Combined window for stratified split
   model_start: "2025-10-01-00-00"
@@ -70,7 +70,7 @@ sampling:
   
   histus:
     n_bins: 30
-    target_percentile: 5  # More aggressive undersampling (was 25)
+    target_percentile: 2  # Keep negatives dominant to emphasize zero baseline
     remove_zero_revenue: true  # Remove buyers with $0 revenue
     
 models:
@@ -92,12 +92,36 @@ models:
       lambda_l1: 0.3
       lambda_l2: 0.3
       scale_pos_weight: 8.0  # Stronger penalty for false positives
+    calibration:
+      method: "beta"
+      regularization: 0.05
+      epsilon: 1e-4
+      max_iter: 500
+
+  high_value_buyer:
+    type: "lightgbm"
+    target_quantile: 0.995
+    min_revenue: 75.0
+    params:
+      objective: "binary"
+      metric: "auc"
+      num_leaves: 15
+      learning_rate: 0.05
+      feature_fraction: 0.6
+      bagging_fraction: 0.7
+      bagging_freq: 5
+      max_depth: 8
+      min_child_samples: 40
+      n_estimators: 300
+      early_stopping_rounds: 40
+      verbose: -1
   
   stage2_revenue:
     type: "odmn"  # Order-preserving multi-task
     horizons: [1, 7, 14]
     params:
-      objective: "regression"
+      objective: "tweedie"
+      tweedie_variance_power: 1.1
       learning_rate: 0.015
       num_leaves: 63
       feature_fraction: 0.7
@@ -119,15 +143,26 @@ models:
       enabled: true
       alpha: 2.5
       floor: 0.0
-      probability_cap: 0.2
-      probability_cutoff: 0.02
+      probability_cap: 0.15
+      probability_cutoff: 0.05
+      target_zero_rate: 0.975
+      min_probability_cutoff: 0.02
+      max_probability_cutoff: 0.15
+      zero_rate_tolerance: 0.002
     whale_filter:
       enabled: true
-      max_revenue: 150.0  # Drop buyers whose D7 revenue exceeds this cap
-      percentile: 99.5    # Additionally drop the top 0.5% even if below absolute cap
+      max_revenue: 90.0   # Drop buyers whose D7 revenue exceeds this cap
+      percentile: 99.0    # Additionally drop the top 1% even if below absolute cap
+    whale_gate:
+      enabled: true
+      alpha: 1.5
+      floor: 0.0
+      probability_cap: 0.4
+      probability_cutoff: 0.25
   
   ensemble:
     type: "stacking"
+    feature_cap: 15.0
     base_models:
       - type: "elastic_net"
         alpha: 0.6
@@ -141,7 +176,8 @@ models:
         max_depth: 6
     meta_learner:
       type: "lightgbm"
-      objective: "regression"  # Changed from huber
+      objective: "quantile"
+      alpha: 0.65
       num_leaves: 31
 
 training:
@@ -152,6 +188,10 @@ training:
   random_state: 42
   use_gpu: false
   cache_features: false
+  zero_anchor:
+    enabled: true
+    rows_per_day: 2
+    random_state: 42
   
   # Use stratified random split to avoid distribution shift
   split:
@@ -164,13 +204,13 @@ training:
     model_end: "2025-10-02-17-00"
   
   sampling:
-    frac: 0.5  # Sample 50% of available train data for richer negative coverage
-    max_train_partitions: 5  # Allow up to five partitions to capture more non-buyers
+    frac: 0.35  # Sample 35% of available train data for manageable runtime
+    max_train_partitions: 3  # Cap chunk count to avoid memory spikes
     random_state: 42
 
 inference:
   batch_size: 5000
   use_cached_embeddings: true
-  max_partitions: 2          # limit Dask partitions for prediction
-  sample_frac: 0.2           # down-sample computed test set to cap RAM
-  limit_rows: 200000         # final hard cap for submission rows during dev
+  max_partitions: null       # process every available partition for full coverage
+  sample_frac: null          # avoid down-sampling so we keep all rows
+  limit_rows: null           # no hard cap; required for 14M+ submission

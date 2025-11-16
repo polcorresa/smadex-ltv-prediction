@@ -16,6 +16,9 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score
 from typing import Dict, Any, Optional
 import logging
+from pathlib import Path
+
+from src.models.calibration import ProbabilityCalibrator
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +26,7 @@ logger = logging.getLogger(__name__)
 class BuyerClassifier:
     """Binary classifier for buyer prediction."""
     
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: Dict[str, Any], model_key: str = 'stage1_buyer') -> None:
         """
         Initialize buyer classifier.
         
@@ -32,12 +35,18 @@ class BuyerClassifier:
         """
         assert config is not None, "Config must not be None"
         assert 'models' in config, "Config must contain 'models' key"
-        assert 'stage1_buyer' in config['models'], \
-            "Config must contain stage1_buyer settings"
+        assert model_key in config['models'], \
+            f"Config must contain {model_key} settings"
         
         self.config = config
+        self.model_key = model_key
         self.model: Optional[lgb.LGBMClassifier | lgb.Booster] = None
         self.feature_names: Optional[list[str]] = None
+        self.calibrator: Optional[ProbabilityCalibrator] = None
+
+    def _model_config(self) -> Dict[str, Any]:
+        """Return model-specific configuration copy."""
+        return self.config['models'][self.model_key]['params'].copy()
     
     def train(
         self,
@@ -81,7 +90,7 @@ class BuyerClassifier:
         self.feature_names = X_train.columns.tolist()
         
         # Get model config
-        model_config = self.config['models']['stage1_buyer']['params'].copy()
+        model_config = self._model_config()
         
         # Handle class imbalance - use either is_unbalance OR scale_pos_weight, not both
         if 'is_unbalance' in model_config and model_config['is_unbalance']:
@@ -150,16 +159,8 @@ class BuyerClassifier:
         logger.info("Top 20 features:")
         logger.info(f"\n{top_features}")
     
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """
-        Predict buyer probability.
-        
-        Args:
-            X: Features
-            
-        Returns:
-            Array of probabilities for positive class
-        """
+    def predict_raw_proba(self, X: pd.DataFrame) -> np.ndarray:
+        """Predict uncalibrated buyer probability."""
         assert self.model is not None, "Model not trained yet"
         assert len(X) > 0, "Input data must not be empty"
 
@@ -184,14 +185,35 @@ class BuyerClassifier:
             )
         else:
             probabilities = self.model.predict_proba(data)[:, 1]
-        
-        # Postconditions
-        assert len(probabilities) == len(X), \
-            "Output length must match input length"
+
+        assert len(probabilities) == len(X), "Output length must match input length"
         assert np.all((probabilities >= 0) & (probabilities <= 1)), \
             "Probabilities must be in [0, 1]"
-        
         return probabilities
+
+    def predict_proba(self, X: pd.DataFrame, *, calibrated: bool = True) -> np.ndarray:
+        """Predict buyer probability and optionally apply calibration."""
+        probabilities = self.predict_raw_proba(X)
+        if calibrated and self.calibrator is not None:
+            return self.calibrator.transform(probabilities)
+        return probabilities
+
+    def attach_calibrator(self, calibrator: ProbabilityCalibrator | None) -> None:
+        """Attach fitted calibrator for downstream use."""
+        self.calibrator = calibrator
+
+    def save_calibrator(self, path: str | Path) -> None:
+        if self.calibrator is None or not self.calibrator.is_fitted:
+            return
+        self.calibrator.save(path)
+
+    def load_calibrator(self, path: str | Path) -> None:
+        path_obj = Path(path)
+        if not path_obj.exists():
+            logger.info("Calibrator file %s missing; using raw probabilities", path_obj)
+            return
+        self.calibrator = ProbabilityCalibrator.load(path_obj)
+        logger.info("Loaded %s calibrator from %s", self.calibrator.method, path_obj)
     
     def save(self, path: str) -> None:
         """

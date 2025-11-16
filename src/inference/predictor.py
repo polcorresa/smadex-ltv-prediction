@@ -8,6 +8,7 @@ Following ArjanCodes best practices:
 """
 from __future__ import annotations
 
+import json
 import numpy as np
 import pandas as pd
 import time
@@ -53,6 +54,16 @@ class FastPredictor:
         
         self.buyer_model = BuyerClassifier(self.config)
         self.buyer_model.load('models/buyer_classifier.txt')
+        self.buyer_model.load_calibrator('models/buyer_calibrator.joblib')
+
+        self.high_value_model: BuyerClassifier | None = None
+        if 'high_value_buyer' in self.config.get('models', {}):
+            high_value_path = Path('models/high_value_classifier.txt')
+            if high_value_path.exists():
+                self.high_value_model = BuyerClassifier(self.config, model_key='high_value_buyer')
+                self.high_value_model.load(str(high_value_path))
+            else:
+                logger.info("High-value classifier missing at %s; continuing without secondary gate", high_value_path)
         
         self.revenue_model = ODMNRevenueRegressor(self.config)
         self.revenue_model.load('models/odmn')
@@ -62,6 +73,7 @@ class FastPredictor:
         
         # Load optimal buyer threshold
         self.optimal_buyer_threshold = self._load_buyer_threshold()
+        self._load_gating_override()
         
         logger.info("Models loaded successfully")
 
@@ -76,9 +88,11 @@ class FastPredictor:
     def _gate_revenue_predictions(
         self,
         buyer_proba: np.ndarray,
-        predictions: RevenuePredictions
+        predictions: RevenuePredictions,
+        *,
+        whale_proba: np.ndarray | None = None
     ) -> RevenuePredictions:
-        """Apply buyer-probability gating to revenue predictions when enabled."""
+        """Apply buyer and whale probability gating when enabled."""
         gating_cfg = (
             self.config
             .get('models', {})
@@ -99,17 +113,61 @@ class FastPredictor:
             prob_cap,
             prob_cutoff
         )
-        return predictions.gate_with_probability(
+        gated = predictions.gate_with_probability(
             buyer_proba,
             power=alpha,
             floor=floor,
             probability_cap=prob_cap,
             probability_cutoff=prob_cutoff
         )
+        whale_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage2_revenue', {})
+            .get('whale_gate', {})
+        )
+        if whale_proba is not None and whale_cfg.get('enabled', False):
+            gated = gated.gate_with_probability(
+                whale_proba,
+                power=float(whale_cfg.get('alpha', 1.0)),
+                floor=float(whale_cfg.get('floor', 0.0)),
+                probability_cap=float(whale_cfg.get('probability_cap', 1.0)),
+                probability_cutoff=float(whale_cfg.get('probability_cutoff', 0.1))
+            )
+        return gated
+    
+    def _predict_whale_probability(self, X: pd.DataFrame) -> np.ndarray | None:
+        if self.high_value_model is None:
+            return None
+        return self.high_value_model.predict_proba(X)
+
+    def _apply_final_gates(
+        self,
+        predictions: np.ndarray,
+        buyer_proba: np.ndarray,
+        whale_proba: np.ndarray | None
+    ) -> np.ndarray:
+        gating_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage2_revenue', {})
+            .get('gating', {})
+        )
+        cutoff = float(gating_cfg.get('probability_cutoff', 0.0)) if gating_cfg else 0.0
+        mask = buyer_proba <= cutoff
+        whale_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage2_revenue', {})
+            .get('whale_gate', {})
+        )
+        if whale_proba is not None and whale_cfg.get('enabled', False):
+            whale_cutoff = float(whale_cfg.get('probability_cutoff', 0.1))
+            mask = mask | (whale_proba <= whale_cutoff)
+        return np.where(mask, 0.0, predictions)
     
     def _load_buyer_threshold(self) -> float:
         """Load optimized buyer threshold, fallback to 1.0 if not found."""
-        import json
         threshold_path = Path('models/buyer_threshold.json')
         
         if threshold_path.exists():
@@ -125,6 +183,33 @@ class FastPredictor:
         else:
             logger.info("No threshold file found; using default alpha=1.0 (no scaling)")
             return 1.0
+
+    def _load_gating_override(self) -> None:
+        """Load buyer gating overrides produced during training."""
+        path = Path('models/buyer_gating.json')
+        if not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text())
+        except json.JSONDecodeError as exc:
+            logger.warning("Failed to parse gating override at %s (%s)", path, exc)
+            return
+
+        gating_cfg = (
+            self.config
+            .get('models', {})
+            .setdefault('stage2_revenue', {})
+            .setdefault('gating', {})
+        )
+        if 'probability_cutoff' in payload:
+            gating_cfg['probability_cutoff'] = float(payload['probability_cutoff'])
+        if 'probability_cap' in payload:
+            gating_cfg['probability_cap'] = float(payload['probability_cap'])
+        logger.info(
+            "Applied gating override: cutoff=%.4f, cap=%.4f",
+            gating_cfg.get('probability_cutoff', 0.0),
+            gating_cfg.get('probability_cap', 1.0)
+        )
     
     def predict(self, df: pd.DataFrame) -> np.ndarray:
         """
@@ -168,10 +253,15 @@ class FastPredictor:
         # Stage 1: Buyer probability + calibration
         buyer_proba = self.buyer_model.predict_proba(X)
         scaled_buyer_proba = self._scale_probabilities(buyer_proba)
+        whale_proba = self._predict_whale_probability(X)
         
         # Stage 2: Revenue predictions
         revenue_preds = self.revenue_model.predict(X, enforce_order=True)
-        revenue_preds = self._gate_revenue_predictions(scaled_buyer_proba, revenue_preds)
+        revenue_preds = self._gate_revenue_predictions(
+            scaled_buyer_proba,
+            revenue_preds,
+            whale_proba=whale_proba
+        )
         
         # Stage 3: Ensemble meta-features (use scaled probabilities)
         loss_config = self.config['models']['stage2_revenue']['loss']
@@ -181,19 +271,26 @@ class FastPredictor:
             .get('stage2_revenue', {})
             .get('gating', {})
         )
+        whale_gate_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage2_revenue', {})
+            .get('whale_gate', {})
+        )
+        ensemble_cfg = self.config.get('models', {}).get('ensemble', {})
         X_meta = build_meta_features(
             scaled_buyer_proba,
             revenue_preds,
             loss_config,
-            gating_cfg
+            gating_cfg,
+            whale_proba=whale_proba,
+            whale_gating_config=whale_gate_cfg,
+            feature_cap=ensemble_cfg.get('feature_cap')
         )
         
         # Final prediction using ensemble
         final_preds = self.ensemble_model.predict(X_meta)
-        cutoff = 0.0
-        if gating_cfg:
-            cutoff = float(gating_cfg.get('probability_cutoff', 0.0))
-        final_preds = np.where(scaled_buyer_proba <= cutoff, 0.0, final_preds)
+        final_preds = self._apply_final_gates(final_preds, scaled_buyer_proba, whale_proba)
         
         logger.debug(
             f"Ensemble predictions: mean=${final_preds.mean():.2f}, std=${final_preds.std():.2f}"

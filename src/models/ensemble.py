@@ -273,7 +273,11 @@ def build_meta_features(
     buyer_proba: np.ndarray,
     revenue_preds: RevenuePredictions,
     loss_config: Dict[str, Any],
-    gating_config: Dict[str, Any] | None = None
+    gating_config: Dict[str, Any] | None = None,
+    *,
+    whale_proba: np.ndarray | None = None,
+    whale_gating_config: Dict[str, Any] | None = None,
+    feature_cap: float | None = None
 ) -> pd.DataFrame:
     """Create Stage 3 meta-features shared by training and inference."""
     assert revenue_preds.length == len(buyer_proba), \
@@ -300,6 +304,24 @@ def build_meta_features(
     data['buyer_gate_mask'] = (clipped > cutoff).astype(float)
     data['buyer_gate_powered'] = gate_factor
 
+    if whale_proba is not None:
+        assert len(whale_proba) == len(buyer_proba), "Whale probabilities must align"
+        whale_cfg = whale_gating_config or {}
+        whale_cap = float(whale_cfg.get('probability_cap', 1.0))
+        whale_cutoff = float(whale_cfg.get('probability_cutoff', 0.1))
+        whale_alpha = float(whale_cfg.get('alpha', 1.0))
+        whale_clipped = np.clip(whale_proba, 0.0, whale_cap)
+        whale_gate = np.where(
+            whale_clipped <= whale_cutoff,
+            0.0,
+            whale_clipped ** whale_alpha
+        )
+        data['whale_proba'] = whale_proba
+        data['whale_gate_mask'] = (whale_clipped > whale_cutoff).astype(float)
+        data['whale_gate_powered'] = whale_gate
+        data['buyer_whale_product'] = buyer_proba * whale_proba
+        data['joint_gate_powered'] = gate_factor * whale_gate
+
     horizons = revenue_preds.available_horizons()
     for horizon in horizons:
         horizon_preds = revenue_preds.get(horizon)
@@ -320,5 +342,17 @@ def build_meta_features(
     assert primary_preds is not None
     data['buyer_x_revenue'] = buyer_proba * primary_preds
     data['gated_revenue'] = gate_factor * primary_preds
-
-    return pd.DataFrame(data)
+    frame = pd.DataFrame(data)
+    if feature_cap is not None:
+        cap_value = float(feature_cap)
+        target_cols = [
+            col for col in frame.columns
+            if col.startswith('revenue_') or col in {
+                'weighted_revenue',
+                'buyer_x_revenue',
+                'gated_revenue'
+            }
+        ]
+        for col in target_cols:
+            frame[col] = np.clip(frame[col], 0.0, cap_value)
+    return frame

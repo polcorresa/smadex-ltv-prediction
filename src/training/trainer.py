@@ -14,6 +14,7 @@ import dask.dataframe as dd
 from pathlib import Path
 import yaml
 import logging
+import json
 from typing import Dict, Any, Tuple, Optional, List
 
 from sklearn.model_selection import train_test_split
@@ -26,6 +27,7 @@ from src.models.buyer_classifier import BuyerClassifier
 from src.models.revenue_regressor import ODMNRevenueRegressor
 from src.models.ensemble import StackingEnsemble, build_meta_features
 from src.models.threshold_optimizer import BuyerThresholdOptimizer
+from src.models.calibration import ProbabilityCalibrator, CalibrationSettings
 from src.utils.logger import log_section, log_subsection, log_metric
 from src.types import TimeHorizon, RevenuePredictions
 
@@ -48,6 +50,7 @@ class TrainingPipeline:
         self.feature_engineer = FeatureEngineer(self.config)
         
         self.buyer_model = None
+        self.high_value_model = None
         self.revenue_model = None
         self.ensemble_model = None
         self.optimal_buyer_threshold = 1.0  # Default: use continuous probabilities
@@ -126,12 +129,52 @@ class TrainingPipeline:
             )
         return df.reindex(columns=columns).fillna(0)
 
+    def _augment_with_zero_anchors(self, df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
+        """Duplicate or synthesize a handful of zero buyers per datetime."""
+        if df.empty or 'datetime' not in df.columns:
+            return df
+
+        rows_per_day = int(cfg.get('rows_per_day', 0))
+        if rows_per_day <= 0:
+            return df
+
+        random_state = int(cfg.get('random_state', 42))
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        zero_rows: list[pd.DataFrame] = []
+        for idx, (dt_value, group) in enumerate(df.groupby('datetime')):
+            if group.empty:
+                continue
+            zeros = group[group['iap_revenue_d7'] == 0]
+            source = zeros if not zeros.empty else group
+            local_state = random_state + idx
+            sample = source.sample(
+                n=rows_per_day,
+                replace=len(source) < rows_per_day,
+                random_state=local_state
+            ).copy()
+            if zeros.empty:
+                sample[numeric_cols] = 0.0
+                if 'buyer_d7' in sample.columns:
+                    sample['buyer_d7'] = 0
+            sample['iap_revenue_d7'] = 0.0
+            if 'row_id' in sample.columns:
+                sample['row_id'] = sample['row_id'].astype(str) + f"_za{idx}"
+            sample['datetime'] = dt_value
+            zero_rows.append(sample)
+
+        if not zero_rows:
+            return df
+        additions = pd.concat(zero_rows, ignore_index=True)
+        return pd.concat([df, additions], ignore_index=True)
+
     def _gate_revenue_predictions(
         self,
         buyer_proba: np.ndarray,
-        predictions: RevenuePredictions
+        predictions: RevenuePredictions,
+        *,
+        whale_proba: np.ndarray | None = None
     ) -> RevenuePredictions:
-        """Blend revenue predictions with zero using buyer probability gating."""
+        """Blend revenue predictions with buyer and optional whale probabilities."""
         gating_cfg = (
             self.config
             .get('models', {})
@@ -152,13 +195,28 @@ class TrainingPipeline:
             prob_cap,
             prob_cutoff
         )
-        return predictions.gate_with_probability(
+        gated = predictions.gate_with_probability(
             buyer_proba,
             power=alpha,
             floor=floor,
             probability_cap=prob_cap,
             probability_cutoff=prob_cutoff
         )
+        whale_gate_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage2_revenue', {})
+            .get('whale_gate', {})
+        )
+        if whale_proba is not None and whale_gate_cfg.get('enabled', False):
+            gated = gated.gate_with_probability(
+                whale_proba,
+                power=float(whale_gate_cfg.get('alpha', 1.0)),
+                floor=float(whale_gate_cfg.get('floor', 0.0)),
+                probability_cap=float(whale_gate_cfg.get('probability_cap', 1.0)),
+                probability_cutoff=float(whale_gate_cfg.get('probability_cutoff', 0.1))
+            )
+        return gated
 
     def _scale_probabilities(self, buyer_proba: np.ndarray) -> np.ndarray:
         """Apply calibrated scaling (P^alpha) using optimized threshold."""
@@ -490,6 +548,14 @@ class TrainingPipeline:
         train_df = self._ensure_target_columns(train_df, "train")
         val_df = self._ensure_target_columns(val_df, "validation")
 
+        zero_anchor_cfg = self.config['training'].get('zero_anchor', {}) or {}
+        if zero_anchor_cfg.get('enabled', False):
+            train_df = self._augment_with_zero_anchors(train_df, zero_anchor_cfg)
+            logger.info(
+                "Injected synthetic zero anchors ➜ train size now %d rows",
+                len(train_df)
+            )
+
         return train_df, val_df
 
     def _prepare_random_split_data(
@@ -766,6 +832,97 @@ class TrainingPipeline:
         
         # Save model
         self.buyer_model.save('models/buyer_classifier.txt')
+
+        raw_val_proba = self.buyer_model.predict_raw_proba(X_val)
+        self._calibrate_buyer_probabilities(raw_val_proba, y_val)
+
+    def train_high_value_classifier(
+        self,
+        train_df: pd.DataFrame,
+        val_df: pd.DataFrame
+    ) -> None:
+        """Train auxiliary classifier for top spenders."""
+        hv_cfg = (
+            self.config
+            .get('models', {})
+            .get('high_value_buyer')
+        )
+        if not hv_cfg:
+            logger.info("High-value buyer classifier disabled in config; skipping")
+            return
+
+        log_section(logger, "STEP 2A: HIGH-VALUE BUYER CLASSIFICATION")
+
+        numeric_cols = self._numeric_feature_columns(train_df)
+        X_train = self._prepare_feature_matrix(train_df, numeric_cols, "High-value train")
+        X_val = self._prepare_feature_matrix(val_df, numeric_cols, "High-value validation")
+
+        quantile = float(hv_cfg.get('target_quantile', 0.995))
+        threshold = float(train_df['iap_revenue_d7'].quantile(quantile))
+        min_threshold = float(hv_cfg.get('min_revenue', 50.0))
+        threshold = max(threshold, min_threshold)
+        logger.info(
+            "High-value threshold (quantile %.4f) -> $%.2f",
+            quantile,
+            threshold
+        )
+
+        y_train = (train_df['iap_revenue_d7'] >= threshold).astype(int).values
+        y_val = (val_df['iap_revenue_d7'] >= threshold).astype(int).values
+
+        positives = int(y_train.sum())
+        negatives = len(y_train) - positives
+        if positives == 0:
+            logger.warning("No positives detected for high-value classifier; skipping training")
+            return
+
+        self.high_value_model = BuyerClassifier(self.config, model_key='high_value_buyer')
+        scale_pos_weight = max(1.0, negatives / positives)
+        self.high_value_model.train(
+            X_train,
+            y_train,
+            X_val,
+            y_val,
+            scale_pos_weight_override=scale_pos_weight
+        )
+        self.high_value_model.save('models/high_value_classifier.txt')
+
+    def _calibrate_buyer_probabilities(self, raw_probs: np.ndarray, targets: np.ndarray) -> None:
+        """Fit optional calibration layer for buyer probabilities."""
+        calibration_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage1_buyer', {})
+            .get('calibration', {})
+        )
+        method = calibration_cfg.get('method', 'none').lower()
+        if method == 'none':
+            logger.info("Probability calibration disabled; using raw buyer outputs")
+            return
+
+        settings = CalibrationSettings(
+            method=method,
+            regularization=float(calibration_cfg.get('regularization', 1e-3)),
+            isotonic_out_of_bounds=calibration_cfg.get('isotonic_out_of_bounds', 'clip'),
+            epsilon=float(calibration_cfg.get('epsilon', 1e-6)),
+            max_iter=int(calibration_cfg.get('max_iter', 200))
+        )
+        calibrator = ProbabilityCalibrator(settings)
+        calibrator.fit(raw_probs, targets)
+        self.buyer_model.attach_calibrator(calibrator)
+        calibrator_path = Path('models/buyer_calibrator.joblib')
+        self.buyer_model.save_calibrator(calibrator_path)
+        logger.info(
+            "Buyer probability calibration applied (%s) and saved to %s",
+            settings.method,
+            calibrator_path
+        )
+
+    def _predict_high_value_probability(self, X: pd.DataFrame) -> np.ndarray | None:
+        """Return whale classifier probabilities when available."""
+        if self.high_value_model is None:
+            return None
+        return self.high_value_model.predict_proba(X)
     
     def train_stage2_revenue(
         self,
@@ -910,10 +1067,15 @@ class TrainingPipeline:
         
         # Get buyer probabilities
         buyer_proba_val = self.buyer_model.predict_proba(X_val)
+        whale_proba_val = self._predict_high_value_probability(X_val)
         
         # Get revenue predictions (for all samples)
         revenue_preds_val = self.revenue_model.predict(X_val, enforce_order=True)
-        revenue_preds_val = self._gate_revenue_predictions(buyer_proba_val, revenue_preds_val)
+        revenue_preds_val = self._gate_revenue_predictions(
+            buyer_proba_val,
+            revenue_preds_val,
+            whale_proba=whale_proba_val
+        )
         revenue_val_d7 = revenue_preds_val.get(TimeHorizon.D7)
         
         if revenue_val_d7 is None:
@@ -939,7 +1101,6 @@ class TrainingPipeline:
         logger.info(f"Will apply: final_pred = (P(buyer)^{self.optimal_buyer_threshold:.4f}) * E(revenue|buyer)")
         
         # Save threshold
-        import json
         threshold_path = Path('models/buyer_threshold.json')
         with open(threshold_path, 'w') as f:
             json.dump({
@@ -948,6 +1109,59 @@ class TrainingPipeline:
                 'method': 'continuous_scaling'
             }, f, indent=2)
         logger.info(f"Threshold saved to {threshold_path}")
+
+    def align_zero_rate(self, val_df: pd.DataFrame) -> None:
+        """Tune gating cutoff to match observed zero rate on validation."""
+        gating_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage2_revenue', {})
+            .get('gating', {})
+        )
+        if not gating_cfg or not gating_cfg.get('enabled', False):
+            logger.info("Zero-rate alignment skipped because gating disabled")
+            return
+
+        log_section(logger, "STEP 2.6: ZERO-RATE ALIGNMENT")
+        numeric_cols = self._numeric_feature_columns(val_df)
+        X_val = self._prepare_feature_matrix(val_df, numeric_cols, "Zero-rate alignment")
+        buyer_proba = self.buyer_model.predict_proba(X_val)
+        scaled = self._scale_probabilities(buyer_proba)
+
+        observed_zero_rate = float((val_df['iap_revenue_d7'] == 0).mean())
+        target_zero_rate = float(gating_cfg.get('target_zero_rate', observed_zero_rate))
+        quantile = np.clip(target_zero_rate, 0.0, 0.9999)
+        candidate_cutoff = float(np.quantile(scaled, quantile))
+        min_cutoff = float(gating_cfg.get('min_probability_cutoff', 0.0))
+        max_cutoff = float(gating_cfg.get('max_probability_cutoff', gating_cfg.get('probability_cap', 0.2)))
+        tuned_cutoff = float(np.clip(candidate_cutoff, min_cutoff, max_cutoff))
+
+        self.config['models']['stage2_revenue']['gating']['probability_cutoff'] = tuned_cutoff
+        predicted_zero_rate = float((scaled <= tuned_cutoff).mean())
+        tolerance = float(gating_cfg.get('zero_rate_tolerance', 0.005))
+        logger.info(
+            "Zero-rate target %.4f -> tuned cutoff %.4f (predicted zeros %.4f)",
+            target_zero_rate,
+            tuned_cutoff,
+            predicted_zero_rate
+        )
+        if abs(predicted_zero_rate - target_zero_rate) > tolerance:
+            logger.warning(
+                "Zero-rate alignment outside tolerance (%.4f); consider adjusting bounds",
+                tolerance
+            )
+
+        override_path = Path('models/buyer_gating.json')
+        payload = {
+            'probability_cutoff': tuned_cutoff,
+            'probability_cap': gating_cfg.get('probability_cap', 0.2),
+            'target_zero_rate': target_zero_rate,
+            'observed_zero_rate': observed_zero_rate,
+            'predicted_zero_rate': predicted_zero_rate,
+            'generated_at': pd.Timestamp.utcnow().isoformat()
+        }
+        override_path.write_text(json.dumps(payload, indent=2))
+        logger.info("Zero-rate override saved to %s", override_path)
     
     def train_stage3_ensemble(
         self,
@@ -964,34 +1178,58 @@ class TrainingPipeline:
         X_train_raw = self._prepare_feature_matrix(train_df, numeric_cols, "Stage 3 train meta")
         buyer_proba_train = self.buyer_model.predict_proba(X_train_raw)
         scaled_buyer_proba_train = self._scale_probabilities(buyer_proba_train)
+        whale_proba_train = self._predict_high_value_probability(X_train_raw)
         revenue_preds_train = self.revenue_model.predict(X_train_raw, enforce_order=True)
-        revenue_preds_train = self._gate_revenue_predictions(scaled_buyer_proba_train, revenue_preds_train)
+        revenue_preds_train = self._gate_revenue_predictions(
+            scaled_buyer_proba_train,
+            revenue_preds_train,
+            whale_proba=whale_proba_train
+        )
         gating_cfg = (
             self.config
             .get('models', {})
             .get('stage2_revenue', {})
             .get('gating', {})
         )
+        whale_gate_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage2_revenue', {})
+            .get('whale_gate', {})
+        )
+        ensemble_cfg = self.config.get('models', {}).get('ensemble', {})
+        feature_cap = ensemble_cfg.get('feature_cap')
         
         # Validation meta-features
         X_val_raw = self._prepare_feature_matrix(val_df, numeric_cols, "Stage 3 validation meta")
         buyer_proba_val = self.buyer_model.predict_proba(X_val_raw)
         scaled_buyer_proba_val = self._scale_probabilities(buyer_proba_val)
+        whale_proba_val = self._predict_high_value_probability(X_val_raw)
         revenue_preds_val = self.revenue_model.predict(X_val_raw, enforce_order=True)
-        revenue_preds_val = self._gate_revenue_predictions(scaled_buyer_proba_val, revenue_preds_val)
+        revenue_preds_val = self._gate_revenue_predictions(
+            scaled_buyer_proba_val,
+            revenue_preds_val,
+            whale_proba=whale_proba_val
+        )
         
         loss_config = self.config['models']['stage2_revenue']['loss']
         X_train_meta = build_meta_features(
             scaled_buyer_proba_train,
             revenue_preds_train,
             loss_config,
-            gating_cfg
+            gating_cfg,
+            whale_proba=whale_proba_train,
+            whale_gating_config=whale_gate_cfg,
+            feature_cap=feature_cap
         )
         X_val_meta = build_meta_features(
             scaled_buyer_proba_val,
             revenue_preds_val,
             loss_config,
-            gating_cfg
+            gating_cfg,
+            whale_proba=whale_proba_val,
+            whale_gating_config=whale_gate_cfg,
+            feature_cap=feature_cap
         )
         
         y_train = train_df['iap_revenue_d7'].values
@@ -1019,12 +1257,14 @@ class TrainingPipeline:
         
         # Step 2: Train Stage 1 (Buyer Classifier)
         self.train_stage1_buyer(train_df, val_df)
+        self.train_high_value_classifier(train_df, val_df)
         
         # Step 3: Train Stage 2 (Revenue Regressor)
         self.train_stage2_revenue(train_df, val_df)
         
         # Step 2.5: Optimize buyer threshold
         self.optimize_buyer_threshold(train_df, val_df)
+        self.align_zero_rate(val_df)
         
         # Step 4: Train Stage 3 (Ensemble)
         self.train_stage3_ensemble(train_df, val_df)
