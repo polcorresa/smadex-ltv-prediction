@@ -45,9 +45,27 @@ class ChunkedPredictor:
         
         self.ensemble_model = StackingEnsemble(self.config)
         self.ensemble_model.load('models/stacking_ensemble.pkl')
+
+        self.optimal_buyer_threshold = self._load_buyer_threshold()
         
         logger.info("Models loaded successfully")
     
+    def _load_buyer_threshold(self) -> float:
+        import json
+        threshold_path = Path('models/buyer_threshold.json')
+        if threshold_path.exists():
+            with open(threshold_path, 'r') as handle:
+                data = json.load(handle)
+            return float(data.get('optimal_threshold', 1.0))
+        return 1.0
+
+    def _scale_probabilities(self, buyer_proba: np.ndarray) -> np.ndarray:
+        alpha = float(self.optimal_buyer_threshold or 1.0)
+        buyer_proba = np.clip(buyer_proba, 0.0, 1.0)
+        if alpha <= 0.0 or np.isclose(alpha, 1.0):
+            return buyer_proba
+        return buyer_proba ** alpha
+
     def _prepare_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Apply preprocessing and feature engineering to chunk."""
         # Preprocess nested features
@@ -83,16 +101,40 @@ class ChunkedPredictor:
         
         # Predict buyer probability
         buyer_proba = self.buyer_model.predict_proba(X)
+        scaled_buyer_proba = self._scale_probabilities(buyer_proba)
         
         # Predict revenue
         revenue_preds = self.revenue_model.predict(X, enforce_order=True)
+        gating_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage2_revenue', {})
+            .get('gating', {})
+        )
+        if gating_cfg:
+            revenue_preds = revenue_preds.gate_with_probability(
+                scaled_buyer_proba,
+                power=float(gating_cfg.get('alpha', 1.0)),
+                floor=float(gating_cfg.get('floor', 0.0)),
+                probability_cap=float(gating_cfg.get('probability_cap', 1.0)),
+                probability_cutoff=float(gating_cfg.get('probability_cutoff', 0.0))
+            )
         
         # Build meta-features for ensemble
         loss_config = self.config['models']['stage2_revenue']['loss']
-        X_meta = build_meta_features(buyer_proba, revenue_preds, loss_config)
+        X_meta = build_meta_features(
+            scaled_buyer_proba,
+            revenue_preds,
+            loss_config,
+            gating_cfg
+        )
         
         # Final prediction using ensemble
         final_preds = self.ensemble_model.predict(X_meta)
+        cutoff = 0.0
+        if gating_cfg:
+            cutoff = float(gating_cfg.get('probability_cutoff', 0.0))
+        final_preds = np.where(scaled_buyer_proba <= cutoff, 0.0, final_preds)
         
         return final_preds
     

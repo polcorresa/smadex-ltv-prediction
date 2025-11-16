@@ -156,6 +156,36 @@ class RevenuePredictions:
 
         return RevenuePredictions(corrected)
 
+    def gate_with_probability(
+        self,
+        probability: np.ndarray,
+        *,
+        power: float = 1.0,
+        floor: float = 0.0,
+        probability_cap: float = 1.0,
+        probability_cutoff: float = 0.0
+    ) -> RevenuePredictions:
+        """Blend revenue predictions with zero using buyer probabilities as gates."""
+        assert len(probability) == self.length, "Probability vector must align with predictions"
+        assert power > 0.0, "Power must be positive"
+        assert floor >= 0.0, "Floor must be non-negative"
+
+        assert 0.0 < probability_cap <= 1.0, "probability_cap must be in (0, 1]"
+        assert 0.0 <= probability_cutoff < 1.0, "probability_cutoff must be in [0, 1)"
+        assert probability_cutoff < probability_cap + 1e-9, "cutoff must be below cap"
+
+        clipped = np.clip(probability, 0.0, probability_cap)
+        gating = np.where(
+            clipped <= probability_cutoff,
+            0.0,
+            clipped ** power
+        )
+        gated = {
+            horizon: np.maximum(floor, values * gating)
+            for horizon, values in self.values.items()
+        }
+        return RevenuePredictions(gated)
+
     @property
     def length(self) -> int:
         """Return number of samples represented by the predictions."""

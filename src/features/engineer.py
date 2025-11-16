@@ -104,6 +104,52 @@ class FeatureEngineer:
             df['device_spending_ratio'] = bundle_rev / (msrp + 1)
         
         return df
+
+    def create_zero_activity_flags(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add binary indicators when key behavioral counts are zero."""
+        assert df is not None, "DataFrame must not be None"
+        assert len(df) > 0, "DataFrame must not be empty"
+
+        logger.info("Creating zero-activity indicators...")
+
+        zero_feature_map: Dict[str, str] = {
+            'num_buys_bundle_count': 'no_bundle_buys',
+            'num_buys_category_count': 'no_category_buys',
+            'num_buys_category_bottom_taxonomy_count': 'no_bottom_tax_buys',
+            'iap_revenue_usd_bundle_count': 'no_bundle_revenue',
+            'iap_revenue_usd_category_count': 'no_category_revenue',
+            'iap_revenue_usd_category_bottom_taxonomy_count': 'no_bottom_tax_revenue',
+            'new_bundles_count': 'no_new_bundles',
+            'user_bundles_count': 'no_install_history',
+            'avg_daily_sessions_total': 'no_sessions_recorded',
+            'avg_duration_mean': 'no_session_duration',
+        }
+
+        for source_col, flag_col in zero_feature_map.items():
+            if source_col in df.columns:
+                numeric_values = self._to_numeric(df[source_col])
+                df[flag_col] = (numeric_values <= 0).astype(int)
+
+        histogram_prefixes = (
+            'country_hist', 'region_hist', 'city_hist',
+            'dev_osv_hist', 'dev_language_hist'
+        )
+        for prefix in histogram_prefixes:
+            top_freq_col = f'{prefix}_top1_freq'
+            if top_freq_col in df.columns:
+                freq_values = self._to_numeric(df[top_freq_col])
+                df[f'{prefix}_missing_hist'] = (freq_values <= 0).astype(int)
+
+        timestamp_flags = {
+            'last_buy_days_ago': 'never_bought_before',
+            'last_install_ts_bundle_days_ago': 'never_installed_bundle_before'
+        }
+        for source_col, flag_col in timestamp_flags.items():
+            if source_col in df.columns:
+                numeric_values = self._to_numeric(df[source_col])
+                df[flag_col] = (numeric_values >= 9990).astype(int)
+
+        return df
     
     def create_local_distribution_features(
         self, 
@@ -340,5 +386,8 @@ class FeatureEngineer:
         
         # 5. Aggregated behavioral features
         df = self.create_aggregated_behavioral_features(df)
+
+        # 6. Zero-activity indicators
+        df = self.create_zero_activity_flags(df)
         
         return df

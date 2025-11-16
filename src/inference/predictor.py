@@ -22,6 +22,7 @@ from src.features.engineer import FeatureEngineer
 from src.models.buyer_classifier import BuyerClassifier
 from src.models.revenue_regressor import ODMNRevenueRegressor
 from src.models.ensemble import StackingEnsemble, build_meta_features
+from src.types import RevenuePredictions
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,48 @@ class FastPredictor:
         self.optimal_buyer_threshold = self._load_buyer_threshold()
         
         logger.info("Models loaded successfully")
+
+    def _scale_probabilities(self, buyer_proba: np.ndarray) -> np.ndarray:
+        """Apply calibrated scaling using the saved optimal threshold."""
+        alpha = float(self.optimal_buyer_threshold or 1.0)
+        buyer_proba = np.clip(buyer_proba, 0.0, 1.0)
+        if alpha <= 0.0 or np.isclose(alpha, 1.0):
+            return buyer_proba
+        return buyer_proba ** alpha
+
+    def _gate_revenue_predictions(
+        self,
+        buyer_proba: np.ndarray,
+        predictions: RevenuePredictions
+    ) -> RevenuePredictions:
+        """Apply buyer-probability gating to revenue predictions when enabled."""
+        gating_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage2_revenue', {})
+            .get('gating', {})
+        )
+        if not gating_cfg or not gating_cfg.get('enabled', False):
+            return predictions
+
+        alpha = float(gating_cfg.get('alpha', 1.0))
+        floor = float(gating_cfg.get('floor', 0.0))
+        prob_cap = float(gating_cfg.get('probability_cap', 1.0))
+        prob_cutoff = float(gating_cfg.get('probability_cutoff', 0.0))
+        logger.debug(
+            "Applying revenue gating during inference: alpha=%.3f, floor=%.3f, cap=%.3f, cutoff=%.3f",
+            alpha,
+            floor,
+            prob_cap,
+            prob_cutoff
+        )
+        return predictions.gate_with_probability(
+            buyer_proba,
+            power=alpha,
+            floor=floor,
+            probability_cap=prob_cap,
+            probability_cutoff=prob_cutoff
+        )
     
     def _load_buyer_threshold(self) -> float:
         """Load optimized buyer threshold, fallback to 1.0 if not found."""
@@ -122,30 +165,35 @@ class FastPredictor:
         
         assert len(X.columns) > 0, "Must have at least one feature column"
         
-        # Stage 1: Buyer probability
+        # Stage 1: Buyer probability + calibration
         buyer_proba = self.buyer_model.predict_proba(X)
-        
-        # TEMPORARY: Disable scaling to test
-        scaled_buyer_proba = buyer_proba
-        
-        # # Apply optimal scaling: (P(buyer))^alpha
-        # if self.optimal_buyer_threshold != 1.0:
-        #     logger.debug(
-        #         f"Applying buyer probability scaling: alpha={self.optimal_buyer_threshold:.4f}"
-        #     )
-        #     scaled_buyer_proba = buyer_proba ** self.optimal_buyer_threshold
-        # else:
-        #     scaled_buyer_proba = buyer_proba
+        scaled_buyer_proba = self._scale_probabilities(buyer_proba)
         
         # Stage 2: Revenue predictions
         revenue_preds = self.revenue_model.predict(X, enforce_order=True)
+        revenue_preds = self._gate_revenue_predictions(scaled_buyer_proba, revenue_preds)
         
         # Stage 3: Ensemble meta-features (use scaled probabilities)
         loss_config = self.config['models']['stage2_revenue']['loss']
-        X_meta = build_meta_features(scaled_buyer_proba, revenue_preds, loss_config)
+        gating_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage2_revenue', {})
+            .get('gating', {})
+        )
+        X_meta = build_meta_features(
+            scaled_buyer_proba,
+            revenue_preds,
+            loss_config,
+            gating_cfg
+        )
         
         # Final prediction using ensemble
         final_preds = self.ensemble_model.predict(X_meta)
+        cutoff = 0.0
+        if gating_cfg:
+            cutoff = float(gating_cfg.get('probability_cutoff', 0.0))
+        final_preds = np.where(scaled_buyer_proba <= cutoff, 0.0, final_preds)
         
         logger.debug(
             f"Ensemble predictions: mean=${final_preds.mean():.2f}, std=${final_preds.std():.2f}"

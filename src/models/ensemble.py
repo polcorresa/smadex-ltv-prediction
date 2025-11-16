@@ -272,13 +272,33 @@ class StackingEnsemble:
 def build_meta_features(
     buyer_proba: np.ndarray,
     revenue_preds: RevenuePredictions,
-    loss_config: Dict[str, Any]
+    loss_config: Dict[str, Any],
+    gating_config: Dict[str, Any] | None = None
 ) -> pd.DataFrame:
     """Create Stage 3 meta-features shared by training and inference."""
     assert revenue_preds.length == len(buyer_proba), \
         "Buyer probabilities and revenue predictions must align"
 
     data: Dict[str, np.ndarray] = {'buyer_proba': buyer_proba}
+
+    if gating_config:
+        cap = float(gating_config.get('probability_cap', 1.0))
+        cutoff = float(gating_config.get('probability_cutoff', 0.0))
+        alpha = float(gating_config.get('alpha', 1.0))
+    else:
+        cap = 1.0
+        cutoff = 0.0
+        alpha = 1.0
+
+    clipped = np.clip(buyer_proba, 0.0, cap)
+    gate_factor = np.where(
+        clipped <= cutoff,
+        0.0,
+        clipped ** alpha
+    )
+    data['buyer_proba_clipped'] = clipped
+    data['buyer_gate_mask'] = (clipped > cutoff).astype(float)
+    data['buyer_gate_powered'] = gate_factor
 
     horizons = revenue_preds.available_horizons()
     for horizon in horizons:
@@ -299,5 +319,6 @@ def build_meta_features(
     primary_preds = revenue_preds.get(primary_horizon)
     assert primary_preds is not None
     data['buyer_x_revenue'] = buyer_proba * primary_preds
+    data['gated_revenue'] = gate_factor * primary_preds
 
     return pd.DataFrame(data)

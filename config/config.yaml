@@ -70,7 +70,7 @@ sampling:
   
   histus:
     n_bins: 30
-    target_percentile: 10  # More aggressive undersampling (was 25)
+    target_percentile: 5  # More aggressive undersampling (was 25)
     remove_zero_revenue: true  # Remove buyers with $0 revenue
     
 models:
@@ -85,40 +85,53 @@ models:
       bagging_fraction: 0.8
       bagging_freq: 5
       max_depth: -1
-      min_child_samples: 20
+      min_child_samples: 60
       n_estimators: 500
       early_stopping_rounds: 50
       verbose: -1
-      is_unbalance: true  # Let LightGBM handle class imbalance
+      lambda_l1: 0.3
+      lambda_l2: 0.3
+      scale_pos_weight: 8.0  # Stronger penalty for false positives
   
   stage2_revenue:
     type: "odmn"  # Order-preserving multi-task
     horizons: [1, 7, 14]
     params:
-      objective: "regression"  # Changed from huber to optimize for RMSLE
+      objective: "regression"
+      learning_rate: 0.015
       num_leaves: 63
-      learning_rate: 0.03
       feature_fraction: 0.7
       bagging_fraction: 0.7
       bagging_freq: 5
       n_estimators: 1000
       early_stopping_rounds: 100
       verbose: -1
-      min_data_in_leaf: 10  # Require minimum samples per leaf
-      lambda_l1: 0.1  # L1 regularization to prevent overfitting
-      lambda_l2: 0.1  # L2 regularization
+      min_data_in_leaf: 20  # Require more samples per leaf to stabilize regression
+      lambda_l1: 0.5  # Stronger regularization keeps predictions conservative
+      lambda_l2: 0.5
+      max_delta_step: 5.0
     loss:
       lambda_order: 0.1
       lambda_d1: 0.3
       lambda_d7: 0.5
       lambda_d14: 0.2
+    gating:
+      enabled: true
+      alpha: 2.5
+      floor: 0.0
+      probability_cap: 0.2
+      probability_cutoff: 0.02
+    whale_filter:
+      enabled: true
+      max_revenue: 150.0  # Drop buyers whose D7 revenue exceeds this cap
+      percentile: 99.5    # Additionally drop the top 0.5% even if below absolute cap
   
   ensemble:
     type: "stacking"
     base_models:
       - type: "elastic_net"
-        alpha: 0.1
-        l1_ratio: 0.5
+        alpha: 0.6
+        l1_ratio: 0.7
         max_iter: 5000
       - type: "random_forest"
         n_estimators: 100
@@ -151,8 +164,8 @@ training:
     model_end: "2025-10-02-17-00"
   
   sampling:
-    frac: 0.3  # Increased from 0.2 for more diverse data
-    max_train_partitions: 2  # Increased from 3
+    frac: 0.5  # Sample 50% of available train data for richer negative coverage
+    max_train_partitions: 5  # Allow up to five partitions to capture more non-buyers
     random_state: 42
 
 inference:

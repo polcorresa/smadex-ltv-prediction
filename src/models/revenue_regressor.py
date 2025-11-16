@@ -160,16 +160,16 @@ class ODMNRevenueRegressor:
             y_val = targets_val[horizon]
             logger.info(f"Training model for {horizon.value}...")
             
-            # Use 'regression' objective which works better for RMSLE
-            # We'll use custom feval to monitor RMSLE during training
             model_config_copy = model_config.copy()
-            if model_config_copy.get('objective') == 'huber':
-                logger.info(f"  ⚠️  Changing objective from 'huber' to 'regression' for RMSLE optimization")
-                model_config_copy['objective'] = 'regression'
-            
-            # Use standard regression without complex sample weighting
-            # The full pipeline performance is what matters, not Stage 2 in isolation
-            logger.info("  Using standard regression objective")
+
+            if self.feature_names:
+                monotone_constraints = self._build_monotone_constraints(self.feature_names)
+                if monotone_constraints:
+                    model_config_copy['monotone_constraints'] = monotone_constraints
+                    model_config_copy.setdefault('monotone_constraints_method', 'advanced')
+                    logger.info("  Applying %d monotonic constraints", sum(1 for value in monotone_constraints if value != 0))
+
+            logger.info("  Using %s objective", model_config_copy.get('objective', 'regression'))
             
             model = lgb.LGBMRegressor(**model_config_copy)
             
@@ -253,6 +253,32 @@ class ODMNRevenueRegressor:
         
         # Postcondition handled inside RevenuePredictions
         return predictions
+
+    def _build_monotone_constraints(self, feature_names: list[str]) -> list[int]:
+        """Derive monotonicity constraints for recency-style features."""
+        negative_keywords = (
+            '_days_ago',
+            'weeks_since_first_seen',
+            'never_bought_before',
+            'never_installed_bundle_before'
+        )
+        positive_keywords = (
+            '_recency_weight',
+            'purchase_recency_score'
+        )
+
+        constraints: list[int] = []
+        applied = False
+        for name in feature_names:
+            direction = 0
+            if any(keyword in name for keyword in negative_keywords):
+                direction = -1
+            elif any(keyword in name for keyword in positive_keywords):
+                direction = 1
+            if direction != 0:
+                applied = True
+            constraints.append(direction)
+        return constraints if applied else []
     
     def _enforce_order_constraints(
         self, 

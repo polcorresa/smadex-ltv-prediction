@@ -27,7 +27,7 @@ from src.models.revenue_regressor import ODMNRevenueRegressor
 from src.models.ensemble import StackingEnsemble, build_meta_features
 from src.models.threshold_optimizer import BuyerThresholdOptimizer
 from src.utils.logger import log_section, log_subsection, log_metric
-from src.types import TimeHorizon
+from src.types import TimeHorizon, RevenuePredictions
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +125,114 @@ class TrainingPipeline:
                 preview
             )
         return df.reindex(columns=columns).fillna(0)
+
+    def _gate_revenue_predictions(
+        self,
+        buyer_proba: np.ndarray,
+        predictions: RevenuePredictions
+    ) -> RevenuePredictions:
+        """Blend revenue predictions with zero using buyer probability gating."""
+        gating_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage2_revenue', {})
+            .get('gating', {})
+        )
+        if not gating_cfg or not gating_cfg.get('enabled', False):
+            return predictions
+
+        alpha = float(gating_cfg.get('alpha', 1.0))
+        floor = float(gating_cfg.get('floor', 0.0))
+        prob_cap = float(gating_cfg.get('probability_cap', 1.0))
+        prob_cutoff = float(gating_cfg.get('probability_cutoff', 0.0))
+        logger.debug(
+            "Applying revenue gating: alpha=%.3f, floor=%.3f, cap=%.3f, cutoff=%.3f",
+            alpha,
+            floor,
+            prob_cap,
+            prob_cutoff
+        )
+        return predictions.gate_with_probability(
+            buyer_proba,
+            power=alpha,
+            floor=floor,
+            probability_cap=prob_cap,
+            probability_cutoff=prob_cutoff
+        )
+
+    def _scale_probabilities(self, buyer_proba: np.ndarray) -> np.ndarray:
+        """Apply calibrated scaling (P^alpha) using optimized threshold."""
+        alpha = float(getattr(self, 'optimal_buyer_threshold', 1.0))
+        if alpha <= 0.0 or np.isclose(alpha, 1.0):
+            return np.clip(buyer_proba, 0.0, 1.0)
+        return np.clip(buyer_proba, 0.0, 1.0) ** alpha
+
+    def _apply_whale_filter(self, df: pd.DataFrame, context: str) -> pd.DataFrame:
+        """Remove high-revenue buyers so regression focuses on typical spenders."""
+        whale_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage2_revenue', {})
+            .get('whale_filter', {})
+        )
+        if not whale_cfg or not whale_cfg.get('enabled', False):
+            return df
+
+        target_col = whale_cfg.get('target_column', 'iap_revenue_d7')
+        if target_col not in df.columns:
+            logger.warning(
+                "%s missing target column '%s' for whale filtering; skipping.",
+                context,
+                target_col
+            )
+            return df
+
+        if df.empty:
+            return df
+
+        cutoff_candidates: list[float] = []
+        max_revenue = whale_cfg.get('max_revenue')
+        if isinstance(max_revenue, (int, float)) and max_revenue > 0:
+            cutoff_candidates.append(float(max_revenue))
+
+        percentile = whale_cfg.get('percentile')
+        percentile_cutoff = None
+        if percentile is not None:
+            assert 0.0 < float(percentile) <= 100.0, "percentile must be in (0, 100]"
+            percentile_cutoff = float(np.percentile(df[target_col], float(percentile)))
+            cutoff_candidates.append(percentile_cutoff)
+
+        if not cutoff_candidates:
+            logger.info("Whale filter enabled but no cutoff specified; skipping.")
+            return df
+
+        cutoff = min(cutoff_candidates)
+        mask = df[target_col] <= cutoff
+        removed = int((~mask).sum())
+        if removed == 0:
+            logger.info(
+                "Whale filter (%s) kept all %d rows (cutoff=%.2f).",
+                context,
+                len(df),
+                cutoff
+            )
+            return df
+
+        filtered_df = df.loc[mask].copy()
+        if filtered_df.empty:
+            raise ValueError(
+                f"Whale filter removed all rows from {context}; lower thresholds or disable filtering."
+            )
+
+        logger.info(
+            "Whale filter (%s): removed %d rows (%.2f%%) above cutoff %.2f (percentile=%s).",
+            context,
+            removed,
+            (removed / len(df)) * 100.0,
+            cutoff,
+            f"{percentile}%" if percentile_cutoff is not None else "n/a"
+        )
+        return filtered_df
 
     def _get_target_array(self, df: pd.DataFrame, column: str, context: str) -> np.ndarray:
         """Return target column values, raising if missing."""
@@ -694,6 +802,16 @@ class TrainingPipeline:
         
         logger.info(f"Training on {len(train_buyers)} buyers with revenue > 0")
         logger.info(f"Validation on {len(val_buyers)} buyers with revenue > 0")
+
+        # Apply whale filtering to training buyers only
+        pre_whale_count = len(train_buyers)
+        train_buyers = self._apply_whale_filter(train_buyers, "Stage 2 train buyers")
+        if len(train_buyers) != pre_whale_count:
+            logger.info(
+                "Training buyers after whale filter: %d (%.2f%% retained)",
+                len(train_buyers),
+                (len(train_buyers) / max(pre_whale_count, 1)) * 100.0
+            )
         
         # Log revenue distribution
         logger.info(f"\nTraining buyer revenue (D7): mean=${train_buyers['iap_revenue_d7'].mean():.4f}, median=${train_buyers['iap_revenue_d7'].median():.4f}")
@@ -795,6 +913,7 @@ class TrainingPipeline:
         
         # Get revenue predictions (for all samples)
         revenue_preds_val = self.revenue_model.predict(X_val, enforce_order=True)
+        revenue_preds_val = self._gate_revenue_predictions(buyer_proba_val, revenue_preds_val)
         revenue_val_d7 = revenue_preds_val.get(TimeHorizon.D7)
         
         if revenue_val_d7 is None:
@@ -844,16 +963,36 @@ class TrainingPipeline:
         # Train meta-features
         X_train_raw = self._prepare_feature_matrix(train_df, numeric_cols, "Stage 3 train meta")
         buyer_proba_train = self.buyer_model.predict_proba(X_train_raw)
+        scaled_buyer_proba_train = self._scale_probabilities(buyer_proba_train)
         revenue_preds_train = self.revenue_model.predict(X_train_raw, enforce_order=True)
+        revenue_preds_train = self._gate_revenue_predictions(scaled_buyer_proba_train, revenue_preds_train)
+        gating_cfg = (
+            self.config
+            .get('models', {})
+            .get('stage2_revenue', {})
+            .get('gating', {})
+        )
         
         # Validation meta-features
         X_val_raw = self._prepare_feature_matrix(val_df, numeric_cols, "Stage 3 validation meta")
         buyer_proba_val = self.buyer_model.predict_proba(X_val_raw)
+        scaled_buyer_proba_val = self._scale_probabilities(buyer_proba_val)
         revenue_preds_val = self.revenue_model.predict(X_val_raw, enforce_order=True)
+        revenue_preds_val = self._gate_revenue_predictions(scaled_buyer_proba_val, revenue_preds_val)
         
         loss_config = self.config['models']['stage2_revenue']['loss']
-        X_train_meta = build_meta_features(buyer_proba_train, revenue_preds_train, loss_config)
-        X_val_meta = build_meta_features(buyer_proba_val, revenue_preds_val, loss_config)
+        X_train_meta = build_meta_features(
+            scaled_buyer_proba_train,
+            revenue_preds_train,
+            loss_config,
+            gating_cfg
+        )
+        X_val_meta = build_meta_features(
+            scaled_buyer_proba_val,
+            revenue_preds_val,
+            loss_config,
+            gating_cfg
+        )
         
         y_train = train_df['iap_revenue_d7'].values
         y_val = val_df['iap_revenue_d7'].values
