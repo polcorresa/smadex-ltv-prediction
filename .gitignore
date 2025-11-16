@@ -9,8 +9,8 @@ __pycache__/
 *.pyd
 
 # Logs and checkpoints
-logs/
-models/
+/logs/
+/models/
 
 # Data artifacts
 /data/raw/
