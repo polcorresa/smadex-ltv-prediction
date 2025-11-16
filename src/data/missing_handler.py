@@ -372,3 +372,4 @@ def summarize_missing_values(df: pd.DataFrame) -> None:
         print(f"  {col:50s}: {count:7,} ({pct:5.1f}%)")
     
     print("="*80)
+

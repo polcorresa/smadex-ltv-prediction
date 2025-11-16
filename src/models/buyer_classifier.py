@@ -239,3 +239,4 @@ class BuyerClassifier:
         feature_names = booster.feature_name()
         self.feature_names = list(feature_names) if feature_names is not None else None
         logger.info(f"Buyer classifier loaded from {path} (features={len(self.feature_names or [])})")
+        

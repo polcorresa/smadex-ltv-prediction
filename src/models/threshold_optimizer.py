@@ -261,3 +261,4 @@ class BuyerThresholdOptimizer:
         assert self.optimal_threshold is not None, \
             "Must call optimize() before getting threshold"
         return self.optimal_threshold
+

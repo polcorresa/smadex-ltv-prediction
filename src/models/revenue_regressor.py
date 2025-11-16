@@ -434,3 +434,4 @@ class ODMNRevenueRegressor:
             return mean_squared_error(y_true, y_pred, squared=False)
         except TypeError:
             return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+        

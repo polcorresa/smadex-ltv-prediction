@@ -151,3 +151,4 @@ class ProbabilityCalibrator:
         calibrator = cls(settings)
         calibrator._model = payload.get("model")
         return calibrator
+

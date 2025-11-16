@@ -506,3 +506,4 @@ class NestedFeatureParser:
                 df = self.missing_handler.transform(df)
         
         return df
+
