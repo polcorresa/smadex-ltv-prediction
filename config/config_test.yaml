@@ -118,6 +118,8 @@ models:
 
 training:
   batch_size: 1000      # Reduced from 10000
+  chunk_size: 20000     # Stream 20k rows per chunk for low RAM usage
+  use_chunked_loading: true  # Enable chunked ingestion for smoke tests
   n_folds: 2            # Reduced from 5
   random_state: 42
   use_gpu: false
@@ -126,7 +128,7 @@ training:
     train_frac: 0.1     # Only 10% of data
     val_frac: 0.2       # Only 20% of validation
     max_train_partitions: 2   # Max 2 partitions
-    max_val_partitions: 1     # Max 1 partition
+    max_val_partitions: 3     # Max 3 partitions
     random_state: 42
     fallback_val_rows: 100    # Fallback if validation is empty
 
@@ -141,4 +143,5 @@ training:
 
 inference:
   batch_size: 1000
+  chunk_size: 20000
   use_cached_embeddings: false
