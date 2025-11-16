@@ -209,14 +209,33 @@ class TrainingPipeline:
             .get('whale_gate', {})
         )
         if whale_proba is not None and whale_gate_cfg.get('enabled', False):
-            gated = gated.gate_with_probability(
-                whale_proba,
-                power=float(whale_gate_cfg.get('alpha', 1.0)),
-                floor=float(whale_gate_cfg.get('floor', 0.0)),
-                probability_cap=float(whale_gate_cfg.get('probability_cap', 1.0)),
-                probability_cutoff=float(whale_gate_cfg.get('probability_cutoff', 0.1))
-            )
+            multiplier = self._compute_whale_multiplier(whale_proba, whale_gate_cfg)
+            gated = gated.multiply(multiplier)
         return gated
+
+    @staticmethod
+    def _compute_whale_multiplier(
+        whale_proba: np.ndarray,
+        whale_gate_cfg: Dict[str, Any]
+    ) -> np.ndarray:
+        """Convert whale probabilities into multiplicative boosts."""
+        assert len(whale_proba) > 0, "Whale probability vector must not be empty"
+        whale_cap = float(whale_gate_cfg.get('probability_cap', 1.0))
+        whale_cutoff = float(whale_gate_cfg.get('probability_cutoff', 0.1))
+        whale_alpha = float(whale_gate_cfg.get('alpha', 1.0))
+        boost_factor = float(whale_gate_cfg.get('boost_factor', 0.0))
+        min_multiplier = float(whale_gate_cfg.get('min_multiplier', 1.0))
+        max_multiplier = float(whale_gate_cfg.get('max_multiplier', max(1.0, min_multiplier)))
+
+        clipped = np.clip(whale_proba, 0.0, whale_cap)
+        gate = np.where(
+            clipped <= whale_cutoff,
+            0.0,
+            clipped ** whale_alpha
+        )
+        multiplier = min_multiplier + boost_factor * gate
+        multiplier = np.clip(multiplier, min_multiplier, max_multiplier)
+        return multiplier
 
     def _scale_probabilities(self, buyer_proba: np.ndarray) -> np.ndarray:
         """Apply calibrated scaling (P^alpha) using optimized threshold."""

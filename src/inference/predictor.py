@@ -127,14 +127,31 @@ class FastPredictor:
             .get('whale_gate', {})
         )
         if whale_proba is not None and whale_cfg.get('enabled', False):
-            gated = gated.gate_with_probability(
-                whale_proba,
-                power=float(whale_cfg.get('alpha', 1.0)),
-                floor=float(whale_cfg.get('floor', 0.0)),
-                probability_cap=float(whale_cfg.get('probability_cap', 1.0)),
-                probability_cutoff=float(whale_cfg.get('probability_cutoff', 0.1))
-            )
+            multiplier = self._compute_whale_multiplier(whale_proba, whale_cfg)
+            gated = gated.multiply(multiplier)
         return gated
+
+    @staticmethod
+    def _compute_whale_multiplier(
+        whale_proba: np.ndarray,
+        whale_cfg: Dict[str, Any]
+    ) -> np.ndarray:
+        """Convert whale probability into multiplicative boost."""
+        whale_cap = float(whale_cfg.get('probability_cap', 1.0))
+        whale_cutoff = float(whale_cfg.get('probability_cutoff', 0.1))
+        whale_alpha = float(whale_cfg.get('alpha', 1.0))
+        boost_factor = float(whale_cfg.get('boost_factor', 0.0))
+        min_multiplier = float(whale_cfg.get('min_multiplier', 1.0))
+        max_multiplier = float(whale_cfg.get('max_multiplier', max(1.0, min_multiplier)))
+
+        clipped = np.clip(whale_proba, 0.0, whale_cap)
+        gate = np.where(
+            clipped <= whale_cutoff,
+            0.0,
+            clipped ** whale_alpha
+        )
+        multiplier = min_multiplier + boost_factor * gate
+        return np.clip(multiplier, min_multiplier, max_multiplier)
     
     def _predict_whale_probability(self, X: pd.DataFrame) -> np.ndarray | None:
         if self.high_value_model is None:
@@ -155,15 +172,6 @@ class FastPredictor:
         )
         cutoff = float(gating_cfg.get('probability_cutoff', 0.0)) if gating_cfg else 0.0
         mask = buyer_proba <= cutoff
-        whale_cfg = (
-            self.config
-            .get('models', {})
-            .get('stage2_revenue', {})
-            .get('whale_gate', {})
-        )
-        if whale_proba is not None and whale_cfg.get('enabled', False):
-            whale_cutoff = float(whale_cfg.get('probability_cutoff', 0.1))
-            mask = mask | (whale_proba <= whale_cutoff)
         return np.where(mask, 0.0, predictions)
     
     def _load_buyer_threshold(self) -> float:

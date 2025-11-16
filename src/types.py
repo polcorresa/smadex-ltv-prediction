@@ -191,6 +191,16 @@ class RevenuePredictions:
         """Return number of samples represented by the predictions."""
         return self._length
 
+    def multiply(self, factors: np.ndarray) -> RevenuePredictions:
+        """Scale each horizon by the provided non-negative multipliers."""
+        assert len(factors) == self.length, "Multiplier vector must align with predictions"
+        assert np.all(factors >= 0.0), "Multipliers must be non-negative"
+        scaled = {
+            horizon: values * factors
+            for horizon, values in self.values.items()
+        }
+        return RevenuePredictions(scaled)
+
 
 @dataclass
 class FeatureSelectionReport:

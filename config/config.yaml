@@ -141,24 +141,26 @@ models:
       lambda_d14: 0.2
     gating:
       enabled: true
-      alpha: 2.5
+      alpha: 1.25
       floor: 0.0
-      probability_cap: 0.15
-      probability_cutoff: 0.05
+      probability_cap: 0.8
+      probability_cutoff: 0.01
       target_zero_rate: 0.975
-      min_probability_cutoff: 0.02
-      max_probability_cutoff: 0.15
+      min_probability_cutoff: 0.005
+      max_probability_cutoff: 0.2
       zero_rate_tolerance: 0.002
     whale_filter:
-      enabled: true
-      max_revenue: 90.0   # Drop buyers whose D7 revenue exceeds this cap
-      percentile: 99.0    # Additionally drop the top 1% even if below absolute cap
+      enabled: false
+      max_revenue: 90.0
+      percentile: 99.0
     whale_gate:
       enabled: true
-      alpha: 1.5
-      floor: 0.0
-      probability_cap: 0.4
-      probability_cutoff: 0.25
+      alpha: 0.8
+      probability_cap: 0.95
+      probability_cutoff: 0.35
+      boost_factor: 2.0
+      min_multiplier: 1.0
+      max_multiplier: 3.5
   
   ensemble:
     type: "stacking"
