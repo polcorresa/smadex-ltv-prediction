@@ -67,3 +67,14 @@ Smadex LTV Prediction estimates 7-day in-app purchase revenue for each ad impres
 1. **Tune model hyperparameters.** Start with `config/config_test.yaml` to probe LightGBM depth, learning rate, and regularization for both the buyer classifier and ODMN regressors. Once a candidate set emerges, copy it into `config/config.yaml` and repeat the training/predict/evaluate cycle to verify stability on the full window.
 2. **Adjust zero-rate clamping.** Review `models/buyer_threshold.json` and `models/buyer_gating.json` after each training run to ensure predicted zero ratios align with the holdout target. If over-clamping suppresses whale recall, widen the `buyer_probability.cap` range or retrain the calibrator (`src/models/calibration.py`) using the latest validation curves.
 3. **Reiterate on large datasets.** When satisfied with small-scale behavior, increase `training.sampling.frac`, `max_train_partitions`, and the datetime windows in `config/config.yaml` to cover the entire production horizon. Use `scripts/train.py`, `scripts/predict_chunked.py`, and `scripts/evaluate_holdout.py` sequentially, monitoring `logs/training.log` for chunk pressure; reduce `chunk_size` if memory spikes appear during this final verification pass.
+
+## Research References
+
+- Li, K. et al. (2022). “Billion-user Customer Lifetime Value Prediction.” CIKM.
+- Wu, C. et al. (2023). “Contrastive Multi-view Framework for Customer Lifetime Value Prediction.” arXiv.
+- Weng, Y. et al. (2024). “OptDist: Learning Optimal Distribution for Customer Lifetime Value.” CIKM.
+- Aminian, E. et al. (2025). “Histogram approaches for imbalanced data streams regression.” Machine Learning.
+- Khan, M. et al. (2025). “Customer Lifetime Value Modeling via Two Stage Selected Trees Ensembles.” IEEE Access.
+- (Authors). (2025). “Machine Learning Algorithms for Predicting Customers’ Lifetime Value: A Systematic Evaluation.” IEEE.
+- Kim, K. et al. (2025). “RFMVDA: An Enhanced Deep Learning Approach for Customer Behavior Classification in E‑Commerce Environments.” IEEE Access.
+- Dhanushkodi, K. et al. (2024). “Customer Behaviour Analysis and Predictive Modelling in Supermarket Retail: A Comprehensive Data Mining Approach.” IEEE Access.
