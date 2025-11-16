@@ -57,6 +57,9 @@ class DataLoader:
         assert self.train_path.exists(), f"Train path does not exist: {self.train_path}"
         assert self.test_path.exists(), f"Test path does not exist: {self.test_path}"
         
+        # Chunk size for memory-efficient processing
+        self.chunk_size = config.get('training', {}).get('chunk_size', 50000)
+        
         # Calculate optimal blocksize based on available memory
         # Target: 100-200 MB per partition for good parallelism
         available_memory = psutil.virtual_memory().available
@@ -70,7 +73,7 @@ class DataLoader:
         
         assert self.optimal_blocksize > 0, "Block size must be positive"
         
-        logger.info(f"Initialized DataLoader with blocksize={self.optimal_blocksize / 1024 / 1024:.1f}MB, cores={n_cores}")
+        logger.info(f"Initialized DataLoader with blocksize={self.optimal_blocksize / 1024 / 1024:.1f}MB, cores={n_cores}, chunk_size={self.chunk_size}")
         
     def _get_partition_paths(self, base_path: Path, start_dt: str = None, end_dt: str = None) -> List[Path]:
         """
@@ -475,6 +478,132 @@ class DataLoader:
         
         if results:
             yield pd.concat(results, ignore_index=True)
+    
+    def iter_train_chunks(
+        self,
+        chunk_size: Optional[int] = None,
+        validation_split: bool = True,
+        start_dt: Optional[str] = None,
+        end_dt: Optional[str] = None,
+        max_partitions: Optional[int] = None
+    ):
+        """
+        Iterate over training data in chunks to avoid loading all into memory.
+        
+        Args:
+            chunk_size: Number of rows per chunk (default from config)
+            validation_split: Whether to yield train and val separately
+            start_dt: Start datetime override
+            end_dt: End datetime override
+            max_partitions: Maximum number of partitions to process
+            
+        Yields:
+            (chunk_df, is_validation) tuples
+        """
+        chunk_size = chunk_size or self.chunk_size
+        logger.info(f"Iterating training data in chunks of {chunk_size} rows")
+        
+        if validation_split:
+            train_start = start_dt or self.config['data']['train_start']
+            train_end = end_dt or self.config['data']['train_end']
+            val_start = self.config['data']['val_start']
+            val_end = self.config['data']['val_end']
+            
+            # Process training partitions
+            train_partitions = self._get_partition_paths(self.train_path, train_start, train_end)
+            if max_partitions:
+                train_partitions = train_partitions[:max_partitions]
+            logger.info(f"Processing {len(train_partitions)} training partitions")
+            
+            for partition_path in train_partitions:
+                parquet_files = list(partition_path.glob("*.parquet"))
+                for file_path in parquet_files:
+                    # Read file in chunks
+                    parquet_file = pd.read_parquet(file_path, engine='pyarrow')
+                    
+                    # Add datetime from partition
+                    dt_str = partition_path.name.split("=")[1]
+                    parquet_file['datetime'] = dt_str
+                    
+                    # Yield in chunks
+                    for i in range(0, len(parquet_file), chunk_size):
+                        chunk = parquet_file.iloc[i:i+chunk_size].copy()
+                        yield chunk, False  # is_validation=False
+            
+            # Process validation partitions
+            val_partitions = self._get_partition_paths(self.train_path, val_start, val_end)
+            if max_partitions:
+                val_partitions = val_partitions[:max_partitions]
+            logger.info(f"Processing {len(val_partitions)} validation partitions")
+            
+            for partition_path in val_partitions:
+                parquet_files = list(partition_path.glob("*.parquet"))
+                for file_path in parquet_files:
+                    parquet_file = pd.read_parquet(file_path, engine='pyarrow')
+                    dt_str = partition_path.name.split("=")[1]
+                    parquet_file['datetime'] = dt_str
+                    
+                    for i in range(0, len(parquet_file), chunk_size):
+                        chunk = parquet_file.iloc[i:i+chunk_size].copy()
+                        yield chunk, True  # is_validation=True
+        else:
+            # Combined window
+            effective_start = start_dt or self.config['data'].get('model_start')
+            effective_end = end_dt or self.config['data'].get('model_end')
+            all_partitions = self._get_partition_paths(self.train_path, effective_start, effective_end)
+            
+            if max_partitions:
+                all_partitions = all_partitions[:max_partitions]
+            
+            logger.info(f"Processing {len(all_partitions)} partitions")
+            
+            for partition_path in all_partitions:
+                parquet_files = list(partition_path.glob("*.parquet"))
+                for file_path in parquet_files:
+                    parquet_file = pd.read_parquet(file_path, engine='pyarrow')
+                    dt_str = partition_path.name.split("=")[1]
+                    parquet_file['datetime'] = dt_str
+                    
+                    for i in range(0, len(parquet_file), chunk_size):
+                        chunk = parquet_file.iloc[i:i+chunk_size].copy()
+                        yield chunk, False
+    
+    def iter_test_chunks(
+        self,
+        chunk_size: Optional[int] = None,
+        max_partitions: Optional[int] = None
+    ):
+        """
+        Iterate over test data in chunks.
+        
+        Args:
+            chunk_size: Number of rows per chunk
+            max_partitions: Maximum number of partitions to process
+            
+        Yields:
+            chunk DataFrames
+        """
+        chunk_size = chunk_size or self.chunk_size
+        logger.info(f"Iterating test data in chunks of {chunk_size} rows")
+        
+        test_start = self.config['data']['test_start']
+        test_end = self.config['data']['test_end']
+        
+        test_partitions = self._get_partition_paths(self.test_path, test_start, test_end)
+        if max_partitions:
+            test_partitions = test_partitions[:max_partitions]
+        logger.info(f"Processing {len(test_partitions)} test partitions")
+        
+        for partition_path in test_partitions:
+            parquet_files = list(partition_path.glob("*.parquet"))
+            for file_path in parquet_files:
+                parquet_file = pd.read_parquet(file_path, engine='pyarrow')
+                dt_str = partition_path.name.split("=")[1]
+                parquet_file['datetime'] = dt_str
+                
+                for i in range(0, len(parquet_file), chunk_size):
+                    chunk = parquet_file.iloc[i:i+chunk_size].copy()
+                    yield chunk
     
     def repartition_optimized(
         self,

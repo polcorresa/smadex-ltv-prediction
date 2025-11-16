@@ -2,6 +2,10 @@
 
 This repository follows strict Python code quality standards inspired by ArjanCodes. Apply these rules to all code suggestions.
 
+I need you to use the production setup to run /scripts/train.py, /scripts/predict.py and /scripts/evaluate_holdout.py for testing code snippets.
+
+Allways run the code using chunked execution to avoid memory issues. Take into account this applies for training, prediction and evaluation.
+
 Use UV for running and testing code snippets. Since it will manage dependencies and environment, ensure compatibility.
 ## Core Principles
 

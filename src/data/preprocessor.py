@@ -8,10 +8,13 @@ Following ArjanCodes best practices:
 """
 from __future__ import annotations
 
-import pandas as pd
-import numpy as np
-from typing import Dict, Any, Optional
+from collections.abc import Sequence
 import logging
+from typing import Any, Dict, Optional
+
+import numpy as np
+import pandas as pd
+
 from .missing_handler import MissingValueHandler
 
 logger = logging.getLogger(__name__)
@@ -29,6 +32,88 @@ class NestedFeatureParser:
         """
         self.config = config or {}
         self.missing_handler = MissingValueHandler(self.config)
+    
+    @staticmethod
+    def _dict_numeric_values(value: Any) -> list[float]:
+        """Extract numeric values from a dict-like object."""
+        if not isinstance(value, dict) or not value:
+            return []
+        numeric_values: list[float] = []
+        for item in value.values():
+            try:
+                numeric_values.append(float(item))
+            except (TypeError, ValueError):
+                continue
+        return numeric_values
+    
+    @staticmethod
+    def _normalize_sequence(value: Any) -> list[Any]:
+        """Return value as list when possible; otherwise an empty list."""
+        if isinstance(value, list):
+            return value
+        if isinstance(value, tuple):
+            return list(value)
+        if hasattr(value, 'tolist'):
+            try:
+                converted = value.tolist()
+                if isinstance(converted, list):
+                    return converted
+                if isinstance(converted, tuple):
+                    return list(converted)
+            except (AttributeError, TypeError, ValueError):
+                return []
+        return []
+    
+    @staticmethod
+    def _safe_unique_count(sequence: Sequence[Any]) -> int:
+        """Count unique elements safeguarding against unhashable items."""
+        if not sequence:
+            return 0
+        try:
+            return len(set(sequence))
+        except TypeError:
+            try:
+                return len(set(str(item) for item in sequence))
+            except Exception:
+                return len(sequence)
+    
+    @staticmethod
+    def _extract_session_stats(session_list: Any) -> dict[str, float | int]:
+        """Compute total, mean, max, and count from session tuples."""
+        if not isinstance(session_list, (list, tuple)) or not session_list:
+            return {'total': 0.0, 'mean': 0.0, 'max': 0.0, 'count': 0}
+        counts: list[float] = []
+        for item in session_list:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                try:
+                    counts.append(float(item[1]))
+                except (TypeError, ValueError):
+                    continue
+        if not counts:
+            return {'total': 0.0, 'mean': 0.0, 'max': 0.0, 'count': 0}
+        total = float(np.sum(counts))
+        mean = float(np.mean(counts))
+        max_value = float(np.max(counts))
+        count = len(counts)
+        return {'total': total, 'mean': mean, 'max': max_value, 'count': count}
+    
+    @staticmethod
+    def _extract_top_k_and_entropy(hist: Any, top_k: int) -> dict[str, float]:
+        """Extract top-k frequencies and entropy from histogram dict."""
+        if not isinstance(hist, dict) or not hist:
+            return {f'top{i+1}_freq': 0.0 for i in range(top_k)} | {'entropy': 0.0}
+        sorted_items = sorted(hist.items(), key=lambda x: x[1], reverse=True)
+        features: dict[str, float] = {}
+        for i in range(top_k):
+            features[f'top{i+1}_freq'] = float(sorted_items[i][1]) if i < len(sorted_items) else 0.0
+        total = float(sum(hist.values()))
+        if total > 0.0:
+            probs = np.array(list(hist.values()), dtype=np.float32) / total
+            entropy = -float(np.sum(probs * np.log(probs + 1e-10)))
+            features['entropy'] = entropy
+        else:
+            features['entropy'] = 0.0
+        return features
     
     @staticmethod
     def parse_dict_features(
@@ -67,34 +152,39 @@ class NestedFeatureParser:
         if column not in df.columns:
             return df
         
-        # Extract values from dictionaries (vectorized with fillna)
-        values = df[column].apply(
-            lambda x: list(x.values()) if isinstance(x, dict) and x else []
-        )
+        # Extract values from dictionaries using vectorized list comprehensions
+        dict_values = [
+            NestedFeatureParser._dict_numeric_values(value)
+            for value in df[column].tolist()
+        ]
         
         # Collect all new columns in a dictionary to avoid fragmentation
-        new_columns = {}
+        new_columns: dict[str, list[float]] = {}
         
-        # Compute aggregations (vectorized NumPy operations)
+        # Compute aggregations with NumPy directly on the prepared lists
         if 'mean' in aggregations:
-            new_columns[f'{column}_mean'] = values.apply(
-                lambda x: np.mean(x) if x else 0.0
-            )
+            new_columns[f'{column}_mean'] = [
+                float(np.mean(values)) if values else 0.0
+                for values in dict_values
+            ]
         if 'std' in aggregations:
-            new_columns[f'{column}_std'] = values.apply(
-                lambda x: np.std(x) if len(x) > 1 else 0.0
-            )
+            new_columns[f'{column}_std'] = [
+                float(np.std(values)) if len(values) > 1 else 0.0
+                for values in dict_values
+            ]
         if 'max' in aggregations:
-            new_columns[f'{column}_max'] = values.apply(
-                lambda x: np.max(x) if x else 0.0
-            )
+            new_columns[f'{column}_max'] = [
+                float(np.max(values)) if values else 0.0
+                for values in dict_values
+            ]
         if 'min' in aggregations:
-            new_columns[f'{column}_min'] = values.apply(
-                lambda x: np.min(x) if x else 0.0
-            )
+            new_columns[f'{column}_min'] = [
+                float(np.min(values)) if values else 0.0
+                for values in dict_values
+            ]
         
-        # Count non-zero entries (important for sparse revenue data)
-        new_columns[f'{column}_count'] = values.apply(len)
+        # Count entries in each dict-derived list
+        new_columns[f'{column}_count'] = [len(values) for values in dict_values]
         
         # Concatenate all new columns at once to avoid fragmentation
         new_df = pd.DataFrame(new_columns, index=df.index)
@@ -134,35 +224,18 @@ class NestedFeatureParser:
             return df
         
         # Collect new columns to avoid fragmentation
-        new_columns = {}
+        new_columns: dict[str, list[int]] = {}
+        normalized_sequences = [
+            NestedFeatureParser._normalize_sequence(value)
+            for value in df[column].tolist()
+        ]
         
-        # Vectorized operations
-        new_columns[f'{column}_count'] = df[column].apply(
-            lambda x: len(x) if isinstance(x, (list, tuple)) or (hasattr(x, '__len__') and hasattr(x, 'tolist')) else 0
-        )
-        
-        # Handle unique counts safely (some lists contain unhashable items)
-        def safe_unique_count(x):
-            if not isinstance(x, (list, tuple)):
-                # Handle numpy arrays
-                if hasattr(x, '__len__') and hasattr(x, 'tolist'):
-                    try:
-                        x = x.tolist()
-                    except:
-                        return 0
-                else:
-                    return 0
-            try:
-                # Try to use set for hashable items
-                return len(set(x))
-            except TypeError:
-                # Fallback: count unique by converting to strings or just return count
-                try:
-                    return len(set(str(item) for item in x))
-                except:
-                    return len(x)  # Just return total count if unique fails
-        
-        new_columns[f'{column}_unique'] = df[column].apply(safe_unique_count)
+        # Vectorized operations using list comprehensions
+        new_columns[f'{column}_count'] = [len(seq) for seq in normalized_sequences]
+        new_columns[f'{column}_unique'] = [
+            NestedFeatureParser._safe_unique_count(seq)
+            for seq in normalized_sequences
+        ]
         
         # Concatenate all new columns at once
         new_df = pd.DataFrame(new_columns, index=df.index)
@@ -201,30 +274,11 @@ class NestedFeatureParser:
         if column not in df.columns:
             return df
         
-        def extract_session_stats(session_list):
-            """Extract statistics from list of (hash, count) tuples"""
-            if not isinstance(session_list, (list, tuple)) or not session_list:
-                return {'total': 0.0, 'mean': 0.0, 'max': 0.0, 'count': 0}
-            
-            try:
-                # Extract counts from tuples
-                counts = [item[1] for item in session_list if isinstance(item, (list, tuple)) and len(item) >= 2]
-                
-                if not counts:
-                    return {'total': 0.0, 'mean': 0.0, 'max': 0.0, 'count': 0}
-                
-                return {
-                    'total': float(sum(counts)),
-                    'mean': float(np.mean(counts)),
-                    'max': float(max(counts)),
-                    'count': len(counts)
-                }
-            except (ValueError, TypeError, IndexError):
-                return {'total': 0.0, 'mean': 0.0, 'max': 0.0, 'count': 0}
-        
-        # Apply extraction
-        session_stats = df[column].apply(extract_session_stats)
-        session_df = pd.DataFrame(session_stats.tolist())
+        session_stats = [
+            NestedFeatureParser._extract_session_stats(session_list)
+            for session_list in df[column].tolist()
+        ]
+        session_df = pd.DataFrame(session_stats, index=df.index)
         
         # Add prefix
         session_df.columns = [f'{column}_{col}' for col in session_df.columns]
@@ -268,35 +322,11 @@ class NestedFeatureParser:
         if column not in df.columns:
             return df
         
-        def extract_top_k_and_entropy(hist: Dict[str, int]) -> Dict[str, float]:
-            if not isinstance(hist, dict) or not hist:
-                return {f'top{i+1}_freq': 0.0 for i in range(top_k)} | {'entropy': 0.0}
-            
-            # Sort by frequency (use heapq for large dicts if needed)
-            sorted_items = sorted(hist.items(), key=lambda x: x[1], reverse=True)
-            
-            # Top-K frequencies
-            features = {}
-            for i in range(top_k):
-                if i < len(sorted_items):
-                    features[f'top{i+1}_freq'] = sorted_items[i][1]
-                else:
-                    features[f'top{i+1}_freq'] = 0.0
-            
-            # Entropy (measure of diversity)
-            total = sum(hist.values())
-            if total > 0:
-                probs = np.array(list(hist.values()), dtype=np.float32) / total
-                entropy = -np.sum(probs * np.log(probs + 1e-10))
-                features['entropy'] = float(entropy)
-            else:
-                features['entropy'] = 0.0
-            
-            return features
-        
-        # Apply extraction (optimized with list comprehension)
-        hist_features = df[column].apply(extract_top_k_and_entropy)
-        hist_df = pd.DataFrame(hist_features.tolist())
+        hist_features = [
+            NestedFeatureParser._extract_top_k_and_entropy(hist, top_k)
+            for hist in df[column].tolist()
+        ]
+        hist_df = pd.DataFrame(hist_features, index=df.index)
         
         # Add prefix
         hist_df.columns = [f'{column}_{col}' for col in hist_df.columns]

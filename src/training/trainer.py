@@ -25,6 +25,7 @@ from src.sampling.histos import HistogramOversampling, HistogramUndersampling
 from src.models.buyer_classifier import BuyerClassifier
 from src.models.revenue_regressor import ODMNRevenueRegressor
 from src.models.ensemble import StackingEnsemble, build_meta_features
+from src.models.threshold_optimizer import BuyerThresholdOptimizer
 from src.utils.logger import log_section, log_subsection, log_metric
 from src.types import TimeHorizon
 
@@ -49,6 +50,7 @@ class TrainingPipeline:
         self.buyer_model = None
         self.revenue_model = None
         self.ensemble_model = None
+        self.optimal_buyer_threshold = 1.0  # Default: use continuous probabilities
         
         # Setup directories
         self._setup_directories()
@@ -167,6 +169,36 @@ class TrainingPipeline:
 
         return df
     
+    def _preprocess_revenue_targets(self, df: pd.DataFrame, context: str) -> pd.DataFrame:
+        """
+        Preprocess revenue targets: cap outliers and optionally transform.
+        
+        Args:
+            df: Dataframe with revenue columns
+            context: Description for logging
+            
+        Returns:
+            Dataframe with preprocessed revenue
+        """
+        preprocessing_cfg = self.config.get('preprocessing', {})
+        revenue_cap = preprocessing_cfg.get('revenue_cap', None)
+        
+        if revenue_cap is not None and revenue_cap > 0:
+            logger.info(f"Capping {context} revenue at ${revenue_cap:.2f}")
+            for col in ['iap_revenue_d1', 'iap_revenue_d7', 'iap_revenue_d14']:
+                if col in df.columns:
+                    original_mean = df[col].mean()
+                    original_max = df[col].max()
+                    capped = np.sum(df[col] > revenue_cap)
+                    df[col] = np.clip(df[col], 0, revenue_cap)
+                    new_mean = df[col].mean()
+                    logger.info(
+                        f"  {col}: mean ${original_mean:.2f}→${new_mean:.2f}, "
+                        f"max ${original_max:.2f}, capped {capped} samples ({capped/len(df)*100:.2f}%)"
+                    )
+        
+        return df
+    
     def _remove_constant_columns(self, train_df: pd.DataFrame, val_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Remove columns that have constant values (no information)
@@ -240,6 +272,112 @@ class TrainingPipeline:
                 fallback_rows
             )
             val_df = train_df.sample(n=fallback_rows, random_state=random_state).copy().reset_index(drop=True)
+
+        train_df = self._ensure_target_columns(train_df, "train")
+        val_df = self._ensure_target_columns(val_df, "validation")
+
+        return train_df, val_df
+    
+    def _prepare_random_split_data_chunked(
+        self,
+        sampling_cfg: Dict[str, Any],
+        split_cfg: Dict[str, Any]
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Load and split data using chunked processing to avoid RAM issues.
+        
+        This collects chunks incrementally and performs stratified split on the combined data.
+        """
+        random_state = split_cfg.get('random_state', sampling_cfg.get('random_state', 42))
+        train_fraction = split_cfg.get('train_fraction', 0.8)
+        assert 0.0 < train_fraction < 1.0, "train_fraction must be in (0, 1)"
+
+        model_start = split_cfg.get('model_start') or self.config['data'].get('model_start') or self.config['data']['train_start']
+        model_end = split_cfg.get('model_end') or self.config['data'].get('model_end') or self.config['data']['val_end']
+        
+        max_partitions = sampling_cfg.get('max_train_partitions', None)
+        chunk_size = self.config.get('training', {}).get('chunk_size', 50000)
+
+        logger.info(
+            "Using chunked stratified random split between %s and %s (train_fraction=%.2f, chunk_size=%d)",
+            model_start,
+            model_end,
+            train_fraction,
+            chunk_size
+        )
+        
+        # Collect all chunks
+        all_chunks = []
+        total_rows = 0
+        
+        logger.info("Loading data in chunks...")
+        for chunk_df, _ in self.data_loader.iter_train_chunks(
+            chunk_size=chunk_size,
+            validation_split=False,
+            start_dt=model_start,
+            end_dt=model_end,
+            max_partitions=max_partitions
+        ):
+            all_chunks.append(chunk_df)
+            total_rows += len(chunk_df)
+            
+            if len(all_chunks) % 10 == 0:
+                logger.info(f"  Loaded {len(all_chunks)} chunks, {total_rows:,} rows")
+        
+        logger.info(f"Loaded {len(all_chunks)} total chunks with {total_rows:,} rows")
+        
+        # Combine chunks
+        logger.info("Combining chunks...")
+        combined_df = pd.concat(all_chunks, ignore_index=True)
+        del all_chunks  # Free memory
+        
+        # Apply sampling if needed
+        frac = sampling_cfg.get('frac', 1.0)
+        if frac < 1.0:
+            logger.info(f"Sampling {frac*100:.1f}% of combined data...")
+            combined_df = combined_df.sample(frac=frac, random_state=random_state).reset_index(drop=True)
+            logger.info(f"After sampling: {len(combined_df):,} rows")
+
+        if combined_df.empty:
+            raise ValueError("Combined modeling dataframe is empty; adjust modeling window or sampling fraction.")
+
+        # Stratified split
+        stratify_column = split_cfg.get('stratify_column', 'buyer_d7')
+        stratify_values: Optional[pd.Series] = None
+        if stratify_column and stratify_column in combined_df.columns:
+            unique_values = combined_df[stratify_column].nunique(dropna=False)
+            if unique_values > 1:
+                stratify_values = combined_df[stratify_column]
+            else:
+                logger.warning(
+                    "Stratify column %s has %d unique values; proceeding without stratification.",
+                    stratify_column,
+                    unique_values
+                )
+        else:
+            logger.warning(
+                "Stratify column %s missing; proceeding without stratification.",
+                stratify_column
+            )
+
+        logger.info("Performing stratified split...")
+        train_df, val_df = train_test_split(
+            combined_df,
+            train_size=train_fraction,
+            random_state=random_state,
+            stratify=stratify_values if stratify_values is not None else None,
+            shuffle=split_cfg.get('shuffle', True)
+        )
+
+        logger.info(
+            "Random split complete ➜ train: %d rows, val: %d rows (stratify=%s)",
+            len(train_df),
+            len(val_df),
+            stratify_column if stratify_values is not None else "none"
+        )
+
+        train_df = train_df.reset_index(drop=True)
+        val_df = val_df.reset_index(drop=True)
 
         train_df = self._ensure_target_columns(train_df, "train")
         val_df = self._ensure_target_columns(val_df, "validation")
@@ -332,9 +470,17 @@ class TrainingPipeline:
         sampling_cfg = self.config['training'].get('sampling', {}) or {}
         split_cfg = self.config['training'].get('split', {}) or {}
         strategy = split_cfg.get('strategy', 'temporal').lower()
+        
+        # Use chunked loading to avoid RAM issues
+        use_chunked = self.config.get('training', {}).get('use_chunked_loading', True)
 
         if strategy == 'stratified_random':
-            train_df, val_df = self._prepare_random_split_data(sampling_cfg, split_cfg)
+            if use_chunked:
+                logger.info("Using chunked data loading (memory-efficient)")
+                train_df, val_df = self._prepare_random_split_data_chunked(sampling_cfg, split_cfg)
+            else:
+                logger.info("Using standard Dask-based loading")
+                train_df, val_df = self._prepare_random_split_data(sampling_cfg, split_cfg)
         else:
             train_df, val_df = self._prepare_temporal_split_data(sampling_cfg)
         
@@ -405,6 +551,12 @@ class TrainingPipeline:
         logger.info(f"  💾 Train memory: {train_df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
         logger.info(f"  💾 Validation memory: {val_df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
         
+        # Preprocess revenue targets (cap outliers)
+        logger.info("")
+        logger.info("  💰 Preprocessing revenue targets...")
+        train_df = self._preprocess_revenue_targets(train_df, "train")
+        val_df = self._preprocess_revenue_targets(val_df, "validation")
+        
         # Log feature groups
         feature_groups = {
             '💰 Revenue': len([c for c in train_df.columns if 'revenue' in c.lower()]),
@@ -459,6 +611,22 @@ class TrainingPipeline:
         X_train = self._prepare_feature_matrix(train_df, numeric_cols, "Stage 1 train")
         y_train = train_df['buyer_d7'].astype(int).values
 
+        total_buyers = int(y_train.sum())
+        total_non_buyers = int(len(y_train) - total_buyers)
+        if total_buyers == 0:
+            logger.warning(
+                "Stage 1 train contains zero buyers; overriding scale_pos_weight to 1.0"
+            )
+            scale_pos_weight_override = 1.0
+        else:
+            scale_pos_weight_override = total_non_buyers / total_buyers
+        logger.info(
+            "Buyer distribution before oversampling: %d buyers (%.2f%%) vs %d non-buyers",
+            total_buyers,
+            (total_buyers / max(len(y_train), 1)) * 100.0,
+            total_non_buyers
+        )
+
         X_val = self._prepare_feature_matrix(val_df, numeric_cols, "Stage 1 validation")
         y_val = val_df['buyer_d7'].astype(int).values
         
@@ -484,7 +652,8 @@ class TrainingPipeline:
             X_train_resampled,
             y_train_resampled,
             X_val,
-            y_val
+            y_val,
+            scale_pos_weight_override=scale_pos_weight_override
         )
         
         # Save model
@@ -502,8 +671,33 @@ class TrainingPipeline:
         train_buyers = train_df[train_df['buyer_d7'] == 1].copy()
         val_buyers = val_df[val_df['buyer_d7'] == 1].copy()
         
-        logger.info(f"Training on {len(train_buyers)} buyers")
-        logger.info(f"Validation on {len(val_buyers)} buyers")
+        logger.info(f"Buyers before zero-revenue filtering: {len(train_buyers)}")
+        
+        # Remove buyers with zero revenue (haven't spent yet)
+        sampling_cfg = self.config.get('sampling', {}).get('histus', {})
+        remove_zero_revenue = sampling_cfg.get('remove_zero_revenue', True)
+        
+        if remove_zero_revenue:
+            zero_revenue_train = (train_buyers['iap_revenue_d7'] == 0).sum()
+            train_buyers = train_buyers[train_buyers['iap_revenue_d7'] > 0].copy()
+            logger.info(
+                f"Removed {zero_revenue_train} zero-revenue buyers from training "
+                f"({zero_revenue_train / len(train_df[train_df['buyer_d7'] == 1]) * 100:.2f}%)"
+            )
+            
+            zero_revenue_val = (val_buyers['iap_revenue_d7'] == 0).sum()
+            val_buyers = val_buyers[val_buyers['iap_revenue_d7'] > 0].copy()
+            logger.info(
+                f"Removed {zero_revenue_val} zero-revenue buyers from validation "
+                f"({zero_revenue_val / len(val_df[val_df['buyer_d7'] == 1]) * 100:.2f}%)"
+            )
+        
+        logger.info(f"Training on {len(train_buyers)} buyers with revenue > 0")
+        logger.info(f"Validation on {len(val_buyers)} buyers with revenue > 0")
+        
+        # Log revenue distribution
+        logger.info(f"\nTraining buyer revenue (D7): mean=${train_buyers['iap_revenue_d7'].mean():.4f}, median=${train_buyers['iap_revenue_d7'].median():.4f}")
+        logger.info(f"Validation buyer revenue (D7): mean=${val_buyers['iap_revenue_d7'].mean():.4f}, median=${val_buyers['iap_revenue_d7'].median():.4f}")
         
         numeric_cols = self._numeric_feature_columns(train_df)
         
@@ -534,9 +728,14 @@ class TrainingPipeline:
         
         # Apply HistUS undersampling (reduce zero-heavy distribution)
         logger.info("Applying HistUS undersampling...")
+        histus_cfg = self.config.get('sampling', {}).get('histus', {})
+        histus_n_bins = histus_cfg.get('n_bins', self.config['sampling']['histos']['n_bins'])
+        histus_percentile = histus_cfg.get('target_percentile', 10.0)  # More aggressive
+        
+        logger.info(f"  Using n_bins={histus_n_bins}, target_percentile={histus_percentile}")
         histus_sampler = HistogramUndersampling(
-            n_bins=self.config['sampling']['histos']['n_bins'],
-            target_percentile=25.0
+            n_bins=histus_n_bins,
+            target_percentile=histus_percentile
         )
         
         X_train_resampled, y_train_d7_resampled = histus_sampler.fit_resample(
@@ -570,6 +769,66 @@ class TrainingPipeline:
         
         # Save models
         self.revenue_model.save('models/odmn')
+    
+    def optimize_buyer_threshold(
+        self,
+        train_df: pd.DataFrame,
+        val_df: pd.DataFrame
+    ) -> None:
+        """
+        Optimize buyer probability threshold/scaling to maximize revenue prediction.
+        
+        Uses validation data to find optimal continuous scaling factor (alpha)
+        such that final_pred = (P(buyer)^alpha) * E(revenue|buyer) minimizes RMSLE.
+        """
+        log_section(logger, "STEP 2.5: BUYER THRESHOLD OPTIMIZATION")
+        
+        assert self.buyer_model is not None, "Buyer model must be trained first"
+        assert self.revenue_model is not None, "Revenue model must be trained first"
+        
+        numeric_cols = self._numeric_feature_columns(val_df)
+        X_val = self._prepare_feature_matrix(val_df, numeric_cols, "Threshold optimization")
+        y_val_revenue = val_df['iap_revenue_d7'].values
+        
+        # Get buyer probabilities
+        buyer_proba_val = self.buyer_model.predict_proba(X_val)
+        
+        # Get revenue predictions (for all samples)
+        revenue_preds_val = self.revenue_model.predict(X_val, enforce_order=True)
+        revenue_val_d7 = revenue_preds_val.get(TimeHorizon.D7)
+        
+        if revenue_val_d7 is None:
+            logger.warning("No D7 predictions available; skipping threshold optimization")
+            return
+        
+        # Optimize using continuous scaling
+        optimizer = BuyerThresholdOptimizer(
+            metric="rmsle",
+            n_thresholds=100,
+            threshold_range=(0.01, 0.99)
+        )
+        
+        result = optimizer.optimize_continuous(
+            buyer_proba=buyer_proba_val,
+            revenue_pred=revenue_val_d7,
+            y_true_revenue=y_val_revenue
+        )
+        
+        self.optimal_buyer_threshold = result.optimal_threshold
+        
+        logger.info(f"Optimal buyer scaling factor (alpha): {self.optimal_buyer_threshold:.4f}")
+        logger.info(f"Will apply: final_pred = (P(buyer)^{self.optimal_buyer_threshold:.4f}) * E(revenue|buyer)")
+        
+        # Save threshold
+        import json
+        threshold_path = Path('models/buyer_threshold.json')
+        with open(threshold_path, 'w') as f:
+            json.dump({
+                'optimal_threshold': self.optimal_buyer_threshold,
+                'optimization_metric': 'rmsle',
+                'method': 'continuous_scaling'
+            }, f, indent=2)
+        logger.info(f"Threshold saved to {threshold_path}")
     
     def train_stage3_ensemble(
         self,
@@ -624,6 +883,9 @@ class TrainingPipeline:
         
         # Step 3: Train Stage 2 (Revenue Regressor)
         self.train_stage2_revenue(train_df, val_df)
+        
+        # Step 2.5: Optimize buyer threshold
+        self.optimize_buyer_threshold(train_df, val_df)
         
         # Step 4: Train Stage 3 (Ensemble)
         self.train_stage3_ensemble(train_df, val_df)

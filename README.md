@@ -28,7 +28,7 @@ Low-level engineering stack for forecasting 7-day in-app purchase revenue (`iap_
 | `README.md` | This document – complete pipeline walkthrough. |
 | `ITERATION_README.md` | Step-by-step data-scaling playbook (SMALL→XLARGE). |
 | `pyproject.toml`, `setup.py` | Package metadata; installable `src/` module. |
-| `config/config*.yaml` | Production + test configs (paths, splits, hyperparams). |
+| `config/config.yaml`, `config/config_test.yaml` | Production + lightweight configs (paths, splits, hyperparams). |
 | `config/features.yaml` | Feature-groups catalog used by the engineer/selector. |
 | `data/raw/` | Expected parquet inputs (`train/train/datetime=...`). Not tracked. |
 | `data/processed/` | Cached feature matrices (created when `cache_features=true`). |
@@ -78,17 +78,71 @@ Feature documentation (group membership, on/off switches) is centralized in `con
 
 ## Quick Iteration Workflow
 
-`ITERATION_README.md` describes a manual scaling loop. Each iteration simply plugs a different config into the validation harness:
+Only two configs are kept to avoid drift:
+
+- `config/config.yaml` – production footprint, full datetime coverage, and the heaviest model settings.
+- `config/config_test.yaml` – trimmed datetime ranges, smaller estimators, and aggressive sampling so you can validate fixes in minutes.
+
+Swap between them by pointing the scripts at the desired path:
 
 ```bash
-uv run python scripts/test_model_validation.py config/config_test_small.yaml   # ~15s
-uv run python scripts/test_model_validation.py config/config_test_medium.yaml  # ~1-2m
-uv run python scripts/test_model_validation.py config/config_test_large.yaml   # ~3-4m
-uv run python scripts/test_model_validation.py config/config_test_xlarge.yaml  # ~4-5m
-uv run python scripts/compare_results.py                                       # tabular summary
+uv run python scripts/train.py --config config/config_test.yaml   # smoke test
+uv run python scripts/train.py --config config/config.yaml        # full run
 ```
 
-Every `config_test_*.yaml` enables `training.split.strategy: stratified_random`, so both train and validation contain a consistent buyer mix (critical for the Stage 2 buyer-only regressor). Adjust `train_frac`, `model_(start|end)`, or estimator counts to trade off accuracy vs. runtime.
+Both configs share the same schema. Tweak the following knobs to scale runtime up or down without creating new files:
+
+- `data.train_start`/`train_end`, `data.val_start`/`val_end`, `data.model_start`/`model_end` – widen or shrink the number of hourly partitions.
+- `training.sampling.frac`, `training.sampling.max_train_partitions`, `training.sampling.max_val_partitions` – control how many partitions are pulled into pandas before training.
+- `training.use_chunked_loading` + `training.chunk_size` – enable chunked Dask-to-pandas materialization and choose how many rows land in each chunk.
+- `models.*.params.n_estimators`, `num_leaves`, `max_depth` – scale per-model complexity.
+
+`ITERATION_README.md` still documents the rationale behind these switches, but day-to-day work only needs the two YAMLs plus the standard CLI flags.
+
+## Training, Prediction & Validation Guide
+
+### Training (`scripts/train.py`)
+
+```bash
+uv run python scripts/train.py --config config/config.yaml        # production footprint
+uv run python scripts/train.py --config config/config_test.yaml   # fast regression test
+```
+
+Where to control the amount of data and chunking:
+
+- **Datetime windows** – `data.train_start`/`train_end`, `data.val_start`/`val_end`, and the combined `data.model_start`/`model_end` determine how many hourly folders are scanned.
+- **Sampling fractions** – `training.sampling.frac` (global fraction), plus the optional `train_frac`/`val_frac` fields, cap how many rows per split survive before `.compute()`.
+- **Partition limits** – `training.sampling.max_train_partitions` and `training.sampling.max_val_partitions` short-circuit the Dask graph after a fixed number of partitions.
+- **Chunk count** – `training.use_chunked_loading: true` instructs the loader to stream pandas DataFrames of size `training.chunk_size` (rows per chunk). Fewer rows per chunk = more chunks, lower peak RAM.
+- **Batch size & folds** – `training.batch_size` and `training.n_folds` dictate how much data flows through LightGBM/ODMN at once.
+
+### Prediction (`scripts/predict.py` & `scripts/predict_chunked.py`)
+
+```bash
+# Standard inference (loads everything up front)
+uv run python scripts/predict.py --config config/config.yaml --max-partitions 4 --sample-frac 0.25
+
+# Fully chunked inference when RAM is tight
+uv run python scripts/predict_chunked.py --config config/config.yaml --chunk-size 50000
+```
+
+Control surface:
+
+- **Dataset size** – adjust `data.test_start`/`test_end` in the config or override with the optional CLI flags in `predict.py` (`--max-partitions`, `--sample-frac`, `--limit-rows`).
+- **Inference chunking** – `scripts/predict_chunked.py` always streams chunks; use `--chunk-size` (defaults to `training.chunk_size`) to pick how many rows the predictor processes before freeing memory.
+- **Feature cache usage** – `inference.use_cached_embeddings`, `inference.max_partitions`, `inference.sample_frac`, and `inference.limit_rows` mirror the CLI switches so you can codify defaults inside the config.
+
+### Validation / Holdout scoring (`scripts/evaluate_holdout.py`)
+
+```bash
+uv run python scripts/evaluate_holdout.py --config config/config.yaml --split val --chunk-size 50000
+uv run python scripts/evaluate_holdout.py --config config/config.yaml --split train --limit-rows 100000
+```
+
+- **Which split** – choose `--split train` or `--split val`. The actual datetime windows come from `data.train_*` / `data.val_*`, and you can override them via `--start-dt` / `--end-dt` for ad-hoc slices.
+- **Rows evaluated** – `--sample-frac`, `--max-partitions`, and `--limit-rows` throttle how much labeled data is loaded before metrics are computed.
+- **Chunk count** – `--use-chunked` is on by default; change the number of rows per chunk with `--chunk-size` to balance wall-clock time vs. RAM. Setting a larger chunk size reduces chunk count (and vice versa).
+- **Metrics** – outputs RMSLE/RMSE/MAE via `src/utils/metrics.evaluate_predictions`, so the same logic is shared with training.
 
 ---
 
@@ -196,23 +250,23 @@ Streamlit UI for analysts:
 
 | Action | Command |
 |--------|---------|
-| Full training run | ```bash
-uv run python scripts/train.py
+| Full training run (prod config) | ```bash
+uv run python scripts/train.py --config config/config.yaml
 ``` |
-| Validation harness (any config) | ```bash
-uv run python scripts/test_model_validation.py config/config_test_medium.yaml
+| Fast training smoke test | ```bash
+uv run python scripts/train.py --config config/config_test.yaml
 ``` |
-| Result comparison | ```bash
-uv run python scripts/compare_results.py
+| Standard prediction with sampling | ```bash
+uv run python scripts/predict.py --config config/config.yaml --max-partitions 4 --sample-frac 0.25 --limit-rows 100000
 ``` |
-| Test-set prediction | ```bash
-uv run python scripts/predict.py --max-partitions 4 --sample-frac 0.25 --limit-rows 100000
+| Chunked prediction (memory safe) | ```bash
+uv run python scripts/predict_chunked.py --config config/config.yaml --chunk-size 50000
 ``` |
 | Holdout RMSLE evaluation | ```bash
-uv run python scripts/evaluate_holdout.py --split val --limit-rows 50000
+uv run python scripts/evaluate_holdout.py --config config/config.yaml --split val --chunk-size 50000
 ``` |
 | Kaggle validation/submit helper | ```bash
-uv run python scripts/submit_kaggle.py --dry-run --align-order --message "My experiment"
+uv run python scripts/submit_kaggle.py --config config/config.yaml --dry-run --align-order --message "My experiment"
 ``` |
 | Cached evaluation demo | ```bash
 uv run python scripts/evaluate.py

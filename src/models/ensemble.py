@@ -18,7 +18,7 @@ from sklearn.linear_model import ElasticNet
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from xgboost import XGBRegressor
 import lightgbm as lgb
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -95,43 +95,22 @@ class StackingEnsemble:
         
         logger.info("Training Stage 3: Stacking Ensemble")
         
-        # Base models
-        base_models = [
-            ('elastic', ElasticNet(
-                alpha=0.1,
-                l1_ratio=0.5,
-                max_iter=1000
-            )),
-            ('rf', RandomForestRegressor(
-                n_estimators=100,
-                max_depth=10,
-                random_state=42,
-                n_jobs=-1
-            )),
-            ('xgb', XGBRegressor(
-                objective='reg:squarederror',
-                max_depth=6,
-                learning_rate=0.05,
-                n_estimators=200,
-                random_state=42
-            ))
-        ]
-        
-        # Meta-learner (LightGBM with Huber loss)
-        meta_learner = lgb.LGBMRegressor(
-            objective='huber',
-            alpha=0.9,
-            num_leaves=31,
-            learning_rate=0.05,
-            n_estimators=200,
-            random_state=42
+        ensemble_cfg = (self.config.get('models', {})
+                         .get('ensemble', {}))
+
+        base_models = self._build_base_models(
+            ensemble_cfg.get('base_models', [])
+        )
+
+        meta_learner = self._build_meta_learner(
+            ensemble_cfg.get('meta_learner', {})
         )
         
         # Stacking ensemble
         self.ensemble = StackingRegressor(
             estimators=base_models,
             final_estimator=meta_learner,
-            cv=5,
+            cv=int(ensemble_cfg.get('cv', 5)),
             n_jobs=-1
         )
         
@@ -156,6 +135,88 @@ class StackingEnsemble:
         assert msle >= 0.0, "MSLE must be non-negative"
         
         logger.info(f"Ensemble - Validation RMSE: {rmse:.4f}, MAE: {mae:.4f}, MSLE: {msle:.6f}")
+
+    def _build_base_models(
+        self,
+        configurations: List[Dict[str, Any]]
+    ) -> List[Tuple[str, Any]]:
+        """Instantiate configured base models with sensible fallbacks."""
+        if not configurations:
+            configurations = [
+                {'type': 'elastic_net', 'alpha': 0.1, 'l1_ratio': 0.5, 'max_iter': 1000},
+                {'type': 'random_forest', 'n_estimators': 100, 'max_depth': 10},
+                {
+                    'type': 'xgboost',
+                    'objective': 'reg:squarederror',
+                    'max_depth': 6,
+                    'learning_rate': 0.05,
+                    'n_estimators': 200
+                }
+            ]
+
+        models: List[Tuple[str, Any]] = []
+        for cfg in configurations:
+            model_type = cfg.get('type', '').lower()
+            if model_type == 'elastic_net':
+                alpha = float(cfg.get('alpha', 0.1))
+                l1_ratio = float(cfg.get('l1_ratio', 0.5))
+                max_iter = int(cfg.get('max_iter', 1000))
+                tol = float(cfg.get('tol', 1e-4))
+                models.append((
+                    'elastic',
+                    ElasticNet(
+                        alpha=alpha,
+                        l1_ratio=l1_ratio,
+                        max_iter=max_iter,
+                        tol=tol
+                    )
+                ))
+            elif model_type == 'random_forest':
+                models.append((
+                    'rf',
+                    RandomForestRegressor(
+                        n_estimators=int(cfg.get('n_estimators', 100)),
+                        max_depth=cfg.get('max_depth', 10),
+                        random_state=int(cfg.get('random_state', 42)),
+                        n_jobs=-1
+                    )
+                ))
+            elif model_type == 'xgboost':
+                params = cfg.copy()
+                params.setdefault('objective', 'reg:squarederror')
+                params.setdefault('learning_rate', 0.05)
+                params.setdefault('n_estimators', 200)
+                params.setdefault('max_depth', 6)
+                params.setdefault('random_state', 42)
+                params.pop('type', None)
+                models.append(('xgb', XGBRegressor(**params)))
+            else:
+                logger.warning(
+                    "Unknown base model type '%s'; skipping",
+                    cfg.get('type')
+                )
+
+        if not models:
+            raise ValueError("Stacking ensemble requires at least one base model")
+
+        return models
+
+    def _build_meta_learner(self, config: Dict[str, Any]) -> lgb.LGBMRegressor:
+        """Instantiate meta learner (currently LightGBM only)."""
+        meta_type = config.get('type', 'lightgbm').lower()
+        if meta_type != 'lightgbm':
+            raise ValueError(f"Unsupported meta learner type: {meta_type}")
+
+        params = config.copy()
+        params.setdefault('objective', 'huber')
+        params.setdefault('alpha', 0.9)
+        params.setdefault('num_leaves', 31)
+        params.setdefault('learning_rate', 0.05)
+        params.setdefault('n_estimators', 200)
+        params.setdefault('random_state', 42)
+        params.pop('type', None)
+
+        return lgb.LGBMRegressor(**params)
     
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """

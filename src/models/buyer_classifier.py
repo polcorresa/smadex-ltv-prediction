@@ -45,7 +45,8 @@ class BuyerClassifier:
         y_train: np.ndarray,
         X_val: pd.DataFrame,
         y_val: np.ndarray,
-        sample_weight: Optional[np.ndarray] = None
+        sample_weight: Optional[np.ndarray] = None,
+        scale_pos_weight_override: Optional[float] = None
     ) -> None:
         """
         Train buyer classification model.
@@ -82,15 +83,34 @@ class BuyerClassifier:
         # Get model config
         model_config = self.config['models']['stage1_buyer']['params'].copy()
         
-        # Compute class imbalance ratio
-        n_buyers = np.sum(y_train == 1)
-        n_non_buyers = np.sum(y_train == 0)
-        scale_pos_weight = n_non_buyers / n_buyers if n_buyers > 0 else 1.0
-        
-        logger.info(f"Class imbalance: {n_non_buyers} non-buyers, {n_buyers} buyers")
-        logger.info(f"Scale pos weight: {scale_pos_weight:.2f}")
-        
-        model_config['scale_pos_weight'] = scale_pos_weight
+        # Handle class imbalance - use either is_unbalance OR scale_pos_weight, not both
+        if 'is_unbalance' in model_config and model_config['is_unbalance']:
+            # Remove scale_pos_weight if is_unbalance is set
+            logger.info("Using is_unbalance=True (automatic class weight handling)")
+            if 'scale_pos_weight' in model_config:
+                del model_config['scale_pos_weight']
+        else:
+            # Compute class imbalance ratio for scale_pos_weight
+            n_buyers = np.sum(y_train == 1)
+            n_non_buyers = np.sum(y_train == 0)
+            if scale_pos_weight_override is not None:
+                scale_pos_weight = scale_pos_weight_override
+                logger.info(
+                    "Using external scale_pos_weight override: %.2f (raw counts %d/%d)",
+                    scale_pos_weight,
+                    n_non_buyers,
+                    n_buyers
+                )
+            else:
+                scale_pos_weight = n_non_buyers / n_buyers if n_buyers > 0 else 1.0
+                logger.info(
+                    "Class imbalance inferred from training data: %d non-buyers vs %d buyers",
+                    n_non_buyers,
+                    n_buyers
+                )
+                logger.info("Scale pos weight: %.2f", scale_pos_weight)
+            
+            model_config['scale_pos_weight'] = scale_pos_weight
         
         # Initialize model
         self.model = lgb.LGBMClassifier(**model_config)

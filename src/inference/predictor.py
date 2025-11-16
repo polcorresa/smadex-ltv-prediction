@@ -59,7 +59,29 @@ class FastPredictor:
         self.ensemble_model = StackingEnsemble(self.config)
         self.ensemble_model.load('models/stacking_ensemble.pkl')
         
+        # Load optimal buyer threshold
+        self.optimal_buyer_threshold = self._load_buyer_threshold()
+        
         logger.info("Models loaded successfully")
+    
+    def _load_buyer_threshold(self) -> float:
+        """Load optimized buyer threshold, fallback to 1.0 if not found."""
+        import json
+        threshold_path = Path('models/buyer_threshold.json')
+        
+        if threshold_path.exists():
+            try:
+                with open(threshold_path, 'r') as f:
+                    data = json.load(f)
+                threshold = float(data.get('optimal_threshold', 1.0))
+                logger.info(f"Loaded optimal buyer threshold: {threshold:.4f}")
+                return threshold
+            except Exception as e:
+                logger.warning(f"Failed to load threshold from {threshold_path}: {e}")
+                return 1.0
+        else:
+            logger.info("No threshold file found; using default alpha=1.0 (no scaling)")
+            return 1.0
     
     def predict(self, df: pd.DataFrame) -> np.ndarray:
         """
@@ -103,15 +125,31 @@ class FastPredictor:
         # Stage 1: Buyer probability
         buyer_proba = self.buyer_model.predict_proba(X)
         
+        # TEMPORARY: Disable scaling to test
+        scaled_buyer_proba = buyer_proba
+        
+        # # Apply optimal scaling: (P(buyer))^alpha
+        # if self.optimal_buyer_threshold != 1.0:
+        #     logger.debug(
+        #         f"Applying buyer probability scaling: alpha={self.optimal_buyer_threshold:.4f}"
+        #     )
+        #     scaled_buyer_proba = buyer_proba ** self.optimal_buyer_threshold
+        # else:
+        #     scaled_buyer_proba = buyer_proba
+        
         # Stage 2: Revenue predictions
         revenue_preds = self.revenue_model.predict(X, enforce_order=True)
         
-        # Stage 3: Ensemble meta-features
+        # Stage 3: Ensemble meta-features (use scaled probabilities)
         loss_config = self.config['models']['stage2_revenue']['loss']
-        X_meta = build_meta_features(buyer_proba, revenue_preds, loss_config)
+        X_meta = build_meta_features(scaled_buyer_proba, revenue_preds, loss_config)
         
-        # Final prediction
+        # Final prediction using ensemble
         final_preds = self.ensemble_model.predict(X_meta)
+        
+        logger.debug(
+            f"Ensemble predictions: mean=${final_preds.mean():.2f}, std=${final_preds.std():.2f}"
+        )
         
         # Postcondition
         assert len(final_preds) == len(df), \

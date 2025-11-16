@@ -13,6 +13,10 @@ data:
   val_end: "2025-10-02-17-00"
   test_start: "2025-10-08-00-00"
   test_end: "2025-10-08-23-00"
+  
+  # Combined window for stratified split
+  model_start: "2025-10-01-00-00"
+  model_end: "2025-10-02-17-00"
 
 features:
   # Core feature groups
@@ -53,11 +57,21 @@ features:
     - hour
     - weekday
 
+# Revenue preprocessing
+preprocessing:
+  revenue_cap: 500.0  # Cap extreme outliers at $500 (p99 was $254)
+  use_log_target: false  # Use log1p transform for revenue targets (optional)
+
 sampling:
   histos:
     n_bins: 30
     window_size: 50000
     target_percentile: 75
+  
+  histus:
+    n_bins: 30
+    target_percentile: 10  # More aggressive undersampling (was 25)
+    remove_zero_revenue: true  # Remove buyers with $0 revenue
     
 models:
   stage1_buyer:
@@ -75,13 +89,13 @@ models:
       n_estimators: 500
       early_stopping_rounds: 50
       verbose: -1
+      is_unbalance: true  # Let LightGBM handle class imbalance
   
   stage2_revenue:
     type: "odmn"  # Order-preserving multi-task
     horizons: [1, 7, 14]
     params:
-      objective: "huber"
-      alpha: 0.9
+      objective: "regression"  # Changed from huber to optimize for RMSLE
       num_leaves: 63
       learning_rate: 0.03
       feature_fraction: 0.7
@@ -90,6 +104,9 @@ models:
       n_estimators: 1000
       early_stopping_rounds: 100
       verbose: -1
+      min_data_in_leaf: 10  # Require minimum samples per leaf
+      lambda_l1: 0.1  # L1 regularization to prevent overfitting
+      lambda_l2: 0.1  # L2 regularization
     loss:
       lambda_order: 0.1
       lambda_d1: 0.3
@@ -102,6 +119,7 @@ models:
       - type: "elastic_net"
         alpha: 0.1
         l1_ratio: 0.5
+        max_iter: 5000
       - type: "random_forest"
         n_estimators: 100
         max_depth: 10
@@ -110,25 +128,36 @@ models:
         max_depth: 6
     meta_learner:
       type: "lightgbm"
-      objective: "huber"
+      objective: "regression"  # Changed from huber
       num_leaves: 31
 
 training:
   batch_size: 10000
+  chunk_size: 50000  # Rows per chunk for memory-efficient processing
+  use_chunked_loading: true  # Use chunked loading to avoid RAM collapse
   n_folds: 5
   random_state: 42
   use_gpu: false
   cache_features: false
+  
+  # Use stratified random split to avoid distribution shift
+  split:
+    strategy: "stratified_random"  # Changed from temporal
+    train_fraction: 0.8
+    stratify_column: "buyer_d7"
+    shuffle: true
+    random_state: 42
+    model_start: "2025-10-01-00-00"
+    model_end: "2025-10-02-17-00"
+  
   sampling:
-    train_frac: 0.2        # ~20% of selected partitions ≈ 5 GB total
-    val_frac: 0.2           # keep validation manageable
-    max_train_partitions: 10  # cap partitions to limit memory
-    max_val_partitions: 2
+    frac: 0.3  # Increased from 0.2 for more diverse data
+    max_train_partitions: 2  # Increased from 3
     random_state: 42
 
 inference:
   batch_size: 5000
   use_cached_embeddings: true
-  max_partitions: 10          # limit Dask partitions for prediction
+  max_partitions: 2          # limit Dask partitions for prediction
   sample_frac: 0.2           # down-sample computed test set to cap RAM
   limit_rows: 200000         # final hard cap for submission rows during dev
